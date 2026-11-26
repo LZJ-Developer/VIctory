@@ -1,71 +1,48 @@
-# DexNom Runtime
+# VIctory · RTX 4060 Laptop 性能交接
 
-**RTX 4060 Laptop performance study** · [Source, frame-time data and community handoff](https://github.com/LZJ-Developer/VIctory/tree/community/rtx4060-handoff-2026-11-27). The Windows Series S test recorded 11.21 FPS across 240 host Present intervals. A PowerShell script reproduces the frame statistics from the published samples.
+VIctory 是把 Xbox Series 游戏的系统与图形调用接到 Windows 和 Direct3D 12 的兼容层。这个分支保留了 2026-11-26 至 27 日在一台 8 GiB 独显笔记本上实测的源码。它解决了一个具体问题：小缓冲先占用显存预算，一块高频读写的大缓冲曾落到系统内存，GPU 反复跨总线取数。给大缓冲留出空间后，同序 **19 次 GPU 计算的采样中位数由 117.36 降至 3.98 ms**。旧组专采超过 50 ms 的慢列表，因此这个比值只适用于捕获的样本。
 
-DexNom Runtime is a community fork of Marvisak's VIctory for Windows x64. It runs an Xbox Series executable from your own game installation and translates its GPU work for Direct3D 12. It builds on the Radeon runtime tested at `e061c69032b84ec6e2ec17340469cd689500dafd` and adds fixes for static sampler selection, wave64 lane masks and integer render targets. Game files, executables, saves and generated shader caches stay on your own computer.
+**整帧还差 55.87 ms 才到平均 30 FPS。** 另一次暖缓存实机运行连续采了 240 个呈现间隔，平均 89.20 ms，即 **11.21 FPS**，最慢的 1% 附近达到 **325.20 ms（P99）**。下一项最值得做的实验，是让 CPU 更早准备好 GPU 要用的资源索引，检查下一帧能否更早提交。
 
-## Run it on your PC
+## 已经测到了什么
 
-1. Use 64-bit Windows and a current Direct3D 12 driver. The game uses mesh shaders and Shader Model 6.6. The Radeon gameplay results and known issues are listed below.
-2. Install Rust for Windows and Visual Studio Build Tools. In the Visual Studio installer, select **Desktop development with C++**, including the x64 MSVC toolset and a Windows 10 or 11 SDK. [Rust installer](https://rustup.rs/) · [Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-3. Download this repository using **Code → Download ZIP**, extract the ZIP to a writable folder, and double-click **Setup.cmd**. Select the Series X game executable inside your own extracted game installation. Keep its accompanying files together. Setup downloads the pinned build dependencies, verifies the BCPack format tables, and compiles the three Windows programs locally. [Download source ZIP](https://github.com/DexNom/VIctory/archive/refs/heads/main.zip)
-4. Open **DexNom Runtime** from the Windows Start menu. Use a controller for the game's first-time setup. The launcher and your local data are in `%LOCALAPPDATA%\DexNom Runtime`. Saves are in `state`, shader caches in `cache`, and per-run diagnostics in `logs`. The file `logs\latest.txt` points to the latest game log.
+| 问题 | 做了什么、测到多少 | 对下一项优化的判断 |
+|---|---|---|
+| GPU 为什么在一组固定计算上耗时过长？ | 在 768 MiB 缓冲池中为大缓冲预留最多 256 MiB。按顺序、着色器标识和调度尺寸匹配 19 次计算，耗时之和的中位数为 117.363 → 3.975 ms，旧组 16 份、新组 24 份。 | 优先让反复访问的数据驻留显存。这个数字描述采到的 GPU 工作段；整帧用呈现间隔单独计时。 |
+| Windows 解除映射拖住了多少时间？ | 一次 511.86 ms 的清页批次内，840 次 Unmap 占 439.16 ms，恢复剩余映射占 54.91 ms。固定请求顺序做 6 对原生回放，合并相邻清页只省 **0.079 ms**（配对中位数）。四轮游戏 B/A/A/B 各 240 个间隔，匹配到的同负载热区清页慢帧为 **0 对**。 | 真实慢帧省时仍未知。独立慢批的 169 个线程状态样本中，162 个在等推锁，0 个处于 Ready；下一次追踪持锁方和唤醒位置。 |
+| 读取纹理指纹能绕过原来的视图吗？ | 在 16 GiB 窗口固定同一映射世代，从游戏地址与后备页各读一次。5,956 次中 705 次完整可比，字节不一致 0 次，5,251 次因锁忙未判定。452 次跨页调用中，27 次可判定。在全部 705 次可比调用中，700 次纯用后备页、5 次同时覆盖后备页和空洞。 | 双读仍执行原路径，实减 Map/Unmap **0/0 次**。这段指纹计时只占 0.170 ms/呈现间隔；消除映射还得覆盖其他读者。 |
+| GPU 和 CPU 在等谁？ | 在另一组较重的 16 个热间隔里，DIRECT 队列工作段平均 47.96 ms，到下一次发送前的空档平均 89.11 ms。这 16 个间隔累计等索引扫描 144.68 ms（平均 9.04 ms/间隔），其中 144.27 ms 与扫描区间重叠。 | 先测试提前请求扫描能隐藏多少等待。在另行测量的 240 个呈现间隔里，152 个与映射批完全没有重叠，其中 148 个仍超过 33.33 ms。 |
+| 值得再做一次全量回读去重吗？ | 固定输入回放中，跳过一次内容相同的 20.07 MiB 上传，GPU 复制段配对中位节省 1.639 ms。源数据改 1 字节后，无条件跳过即产生错误。读回分块从 64 改为 4 KiB，在一份前后像上只少传 92 KiB。 | 优先寻找便宜的版本证据。CPU 直接读 GPU_UPLOAD 的同样大小缓冲，本机实测为 435.20 ms，缓存读回缓冲为 1.45 ms。 |
 
-To update, close the runtime, extract the new source ZIP, and run **Setup.cmd** again. It reuses the saved game path and the same save directory. To select a different installation, pass its executable path to Setup from PowerShell:
+硬件为 i7-12800HX、32 GB RAM、RTX 4060 Laptop 8 GiB。两臂沿用 Series S 配置和 1920×1080 宿主呈现设置，没有主动降低分辨率。逐帧内部渲染尺寸尚未采集。帧率按宿主两次呈现之间的墙钟计算，30 FPS 的预算是 1000/30 = 33.33 ms。表中各项沿用各自的测量窗口。[实验数据、样本数与方法](docs/benchmarks/results.json)
 
-```powershell
-.\Setup.cmd -GamePath "D:\My Games\Series X\game_scarlett_master.exe"
-```
+## 两种复核入口
 
-To warm the shader cache, open `victory-warm.exe` in the installed runtime directory. The log lists translated and refused shaders. Graphics pipelines also depend on draw state encountered during play. If you see a missing `VCRUNTIME140.dll` error, install Microsoft's x64 redistributable. [Microsoft Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-
-For a manual build, run `.\Initialize-FormatTables.ps1`, then `cargo build --locked --release -p victory --features diagnostics --bins`. The release binaries are in `target\release`. Place all three together outside the checkout and pass the game executable path to `victory-play.exe`. Custom data and cache directories are documented in the configuration example. [Configuration example](victory.example.toml)
-
-## Try experimental ray tracing on Radeon
-
-After running **Setup.cmd**, open **DexNom Runtime (Experimental RT)** from the Windows Start menu. This starts the game with the acceleration-structure builder, ray traversal and lighting resolve enabled. The shortcut uses your existing saves. Open **DexNom Runtime** for the usual renderer.
-
-To start the same RT configuration from PowerShell:
+**只复核帧率，不需要游戏或显卡。** 以下命令在 PowerShell 7 中读取仓库内的 240 个相对时间间隔，输出 FPS、P50/P95/P99、超预算帧数，以及有多少个间隔和映射批次重叠。对应结果为 11.2108 FPS、234/240 超过 33.33 ms。[公开样本](docs/benchmarks/present-window.json)
 
 ```powershell
-& "$env:LOCALAPPDATA\DexNom Runtime\victory-play.exe" --rt
+git clone --single-branch --branch community/rtx4060-handoff-2026-11-27 https://github.com/LZJ-Developer/VIctory.git
+cd VIctory
+pwsh -NoProfile -File ./scripts/Measure-PresentWindow.ps1
 ```
 
-Chapter 1 City produced in-range ray and triangle intersections on an RX 7900 XTX. The game builds and traverses its acceleration structures through translated Direct3D 12 compute shaders. Frame times can still reach several seconds. Interior lighting, shadows and performance vary by scene. [Ray-tracing implementation](docs/fork-ray-tracing.md) · [City testing](BENCHMARK.md)
-
-## Changes in this snapshot
-
-- Pixel shaders that read neighboring pixels in a 2×2 group now preserve the values at triangle edges. On an RX 7900 XTX, this reduced incorrect edge pixels from 32 to zero in each of two adjoining-triangle tests. Cube-map sampling also selects the correct mip level for explicit gradients and honors the shader's minimum mip level.
-- The ray-tracing memory directory can grow beyond 1,023 backing buffers. Each recorded draw or dispatch uses only the views available when it was recorded. Older command lists keep their original views.
-- Streamed textures can upload when only their middle pages are resident. The runtime merges overlapping memory notifications and rescans tracked textures if the notification queue fills. Previously used depth-only pipelines now warm ahead of speculative material pipelines to reduce missing shadows during loading.
-- Some dock objects still appear black in the City save. The same distant dock fixtures appeared dark with the ray-structure builder disabled. The effect of these changes on those objects and on gameplay FPS is still being tested.
-- GPU readback identifies changed pages and combines adjacent copy ranges. This targets CPU/GPU synchronization and transfer overhead.
-- Ray-structure builder dispatches now honor the game's thread counts and mask excess lanes in the final group. Read-only traversal no longer declares the entire guest memory directory writable when the shader sends its output to another buffer or texture.
-- Texture handling searches for contiguous descriptor slots and admits already-resident textures under memory pressure. Earlier changes address publication order, placed-texture ownership and supported render-XOR layouts.
-- Shaders can choose between two static samplers across a uniform branch. This recovered 40 shader variants from the tested archive. Another fix recovered one voxel visibility shader by recognizing a saved and restored wave64 lane mask. Mixed render targets retain their individual write masks when an integer target bypasses blending.
-- The runtime preserves the game's vertex output interpolation and fixes output signature ordering. All 2,191 archive vertex shaders passed the Microsoft DXIL validator, including 18 water shaders. New textures and retries share the upload budget, and a previously refused buffer view is checked again when its backing allocation changes.
-- The runtime resolves guest addresses from ray-tracing descriptors, preserves raw buffer offsets and prepares the memory each command list reads. Texture uploads can proceed while Windows remaps unrelated memory. In-game ray-traced lighting is still experimental.
-- Five additional shadow compute shaders compile and create pipelines on the RX 7900 XTX. The translated ray-node regression also exercises three reflections through the guest-page directory. Changes confined to the standalone execution tests now preserve cached shader translations.
-- Shader translation preserves the guest wave width for lane permutations and handles heap-indexed texture-size queries. Save handling flushes copied blobs before publication and can recover a complete checkpoint.
-
-The source ZIP builds with the Windows setup script. The test report covers shader validation, a Radeon pipeline check, gameplay frame times and the remaining interior lighting issue. [Test and benchmark report](BENCHMARK.md)
-
-### Testing CPU submission workers
-
-For a local experiment, open PowerShell and run the following after setup. The process uses four CPU workers for eligible upload batches and can record independent transition command lists on the shared worker pool. The final GPU queue, fence signals and resource transitions retain the game's submission order. Compare the same save and camera after the initial streaming period. The default launcher uses the baseline settings.
+**在自己的 Windows 机器上对照显存分配策略。** 运行需要 Windows x64、MSVC C++ 构建工具、Windows SDK、仓库固定的 Rust 1.98.1，以及自备游戏文件。以下命令在克隆目录的 Developer PowerShell 中执行。日志中的 `size-tiered card buffer admission enabled` 表示新策略已启用；随后 `size-tiered allocation outcome for observed buffer` 的 `local` 字段给出目标缓冲的分配结果。
 
 ```powershell
-$env:VICTORY_FILL_WORKERS = '4'
-$env:VICTORY_PARALLEL_PRELUDES = '1'
-& "$env:LOCALAPPDATA\DexNom Runtime\victory-play.exe"
+cargo build --locked --release --features diagnostics -p victory --bin victory
+$env:VICTORY_GAME_DIR = Read-Host '输入本机游戏文件所在目录'
+$env:VICTORY_CARD_BUFFERS_MB = '768'
+$env:VICTORY_LOG = 'info'
+$env:VICTORY_HOT_BUFFER_PRIORITY = '1'
+.\Play-VIctory.cmd pareto-residency
 ```
 
-## Credits and licensing
+把最后一个开关改为 `0` 后重新启动，即可在相同池预算下运行对照。每轮复用同一存档、镜头路线和预热状态，同时记下每帧 draw、dispatch 和请求页数，便于识别可比的慢帧。[显存分配实现](crates/victory-gpu/src/shadow.rs) · [Windows 映射实现](crates/victory-hle/src/modules/xmem.rs) · [双路取样实现](crates/victory-gpu/src/fingerprint_dual.rs)
 
-- Marvisak and the VIctory contributors created the original runtime. [Marvisak/VIctory](https://github.com/Marvisak/VIctory)
-- ZSlayerHQ and the contributors to the victory-world line provided the rendering baseline used here, including the Radeon work from triippywhale and asdaasdsaddf. [victory-world-runtime](https://github.com/ZSlayerHQ/victory-world-runtime) · [Integrated revision](https://github.com/ZSlayerHQ/victory-world-runtime/commit/99f8834aa16b98d7f3943b8de262a8d4857bda7b)
-- The XCL contributors published an independent Xbox Series compatibility layer. Their work informed our investigation of shader translation, CPU/GPU memory synchronization and performance. [xcl-dev/xcl](https://github.com/xcl-dev/xcl)
+## 社区接力的第一项实验
 
-The upstream README preserves the original credits and historical test results. [Upstream README](README.upstream.md)
+**只前移描述符扫描请求。** 描述符告诉 GPU 要读哪块缓冲或纹理。当前提交线程可能到准备发送时才等索引扫描结束。候选改法是在游戏命令刚入队时请求扫描，让后台线程利用排队时间工作；如果此后有相关写入，提交线程仍要等写入之后才开始的扫描轮次。Belobug 分支保留了这个实现，也同时改了日志锁分片。把两个改动拆开，才能给提前扫描单独定价。[本地同步代码](crates/victory-gpu/src/descriptor.rs) · [上游设计和轮次契约](https://github.com/Belobug/VIctory-Belobug-AMD/blob/cd8dfc06ace7ccb91a19431e74bc2d0de2a10145/crates/victory-gpu/src/port_journal.rs#L5-L53)
 
-VIctory source is licensed under GPL-3.0-or-later. The upstream project identifies the required BCPack format tables as separately supplied data outside that license. This source archive omits that file. The setup script verifies a local or upstream copy before use. [License](LICENSE) · [Upstream asset policy and table notice](docs/asset-policy.md)
+验收时在同一构建内切换 A/B，分别报告同负载呈现间隔、提交线程等待和 GPU 时间，同时核对相同纹理代次的输出。若提交等待减少而呈现没有提前，记录这段等待转移到了哪里。复现报告附上提交号、GPU/驱动、内部与输出分辨率（可观测者）、样本数、P50/P99 和工作量匹配数即可。
+
+本分支沿用 VIctory 及其社区贡献者的代码和许可，从公开可取的 `f4b48ad` 源码提交派生。构建和启动输入的改动共 18 个 Rust 文件。版权及格式表例外沿用上游记录。[上游基线](https://github.com/avatarmanz/VIctory-7900XTX/commit/f4b48ad766ddbec1a1867022cd42f7645b0dd55e) · [许可证](LICENSE) · [上游资产约定](docs/asset-policy.md)
