@@ -439,7 +439,11 @@ fn clamp_into(
     ahead: bool,
 ) -> bool {
     let before = list.indirect_state(dst);
-    let recorded = record_clamp_as(c, &list.list, (dst, before), budget, src, count, spec, ahead);
+    #[cfg(feature = "diagnostics")]
+        let broad_at=crate::host::focus_dispatch::broad().then(||list.focus_dispatch_begin(&format!("clamp{}|helper",spec.0), [0;3], false)).flatten();
+        let recorded = record_clamp_as(c, &list.list, (dst, before), budget, src, count, spec, ahead);
+        #[cfg(feature = "diagnostics")]
+        if let Some(at)=broad_at {list.focus_dispatch_end(at);}
     if recorded {
         list.indirect_readable(dst);
     }

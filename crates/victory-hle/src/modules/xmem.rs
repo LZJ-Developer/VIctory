@@ -180,6 +180,9 @@ pub extern "system" fn XMemVirtualAlloc(
     if !at.is_null() && !placeholder {
         victory_gpu::title_memory_allocated(at as usize, size);
     }
+    if placeholder && !at.is_null() && flags == 3 && asked == 0x801 && size == (16usize << 30) {
+        victory_gpu::fingerprint_dual::register_window(at as usize);
+    }
     note_protection(asked, kind, flags, at as usize, size);
     at
 }
@@ -238,6 +241,7 @@ pub extern "system" fn XMemVirtualQuery(
         } else {
             0
         };
+        view_line(format_args!("Q\t{}\t{}\t{}\t{}",view_page(address as usize),view_page(info.host.BaseAddress as usize),view_page(info.host.AllocationBase as usize),info.host.RegionSize));
         info.tag_code = 0;
         info.tag = [0; 4];
     }
@@ -385,6 +389,7 @@ pub extern "system" fn XMemIsToolsMemAvailable() -> BOOL {
 const PAGE: usize = 64 << 10;
 
 struct Section {
+    trace_section_id: u64,
     handle: HANDLE,
     pages: usize,
     /// A view of the whole section, kept ([`Section::window`]); 0 if the
@@ -447,6 +452,7 @@ impl Section {
     /// Commits the pages from `index` on that a view at `base` shows, unless
     /// all of them are ([`lean`]): committed for one view is for all.
     fn commit_shown(&self, index: usize, base: usize, len: usize) -> bool {
+        let _bits=map_clock::phase(Phase::CommitBits);
         use std::sync::atomic::Ordering;
         let pages = index..(index + len / PAGE).min(self.pages);
         let bit = |p: usize| (&self.committed[p / 64], 1 << (p % 64));
@@ -678,7 +684,9 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     // For the GPU side's in-place census: only a committed section can be
     // opened as a host heap.
     victory_gpu::title_memory_section(handle as usize, size as u64, on_wine());
+    static SECTION_ID: AtomicU64 = AtomicU64::new(1);
     let section = Arc::new(Section {
+        trace_section_id: SECTION_ID.fetch_add(1, Ordering::Relaxed),
         handle,
         pages: n,
         window: std::sync::OnceLock::new(),
@@ -992,13 +1000,46 @@ enum Call {
     Commit = 13,
 }
 
+use victory_gpu::map_clock::{self, Phase};
+
+// A packet-owned counter is carried into the existing mapping workers so
+// unrelated concurrent streaming calls cannot enter this packet's totals.
+type AliasCalls = Arc<[AtomicU64; 4]>;
+thread_local! {
+    static ALIAS_CALLS: std::cell::RefCell<Option<AliasCalls>> = const { std::cell::RefCell::new(None) };
+}
+struct AliasScope(Option<AliasCalls>);
+impl AliasScope {
+    fn enter(calls: Option<AliasCalls>) -> Self {
+        Self(ALIAS_CALLS.with(|slot| slot.replace(calls)))
+    }
+}
+impl Drop for AliasScope {
+    fn drop(&mut self) {
+        ALIAS_CALLS.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
 /// Runs `f`, a system call, and counts it while the streaming log is on.
 fn counted<T>(call: Call, f: impl FnOnce() -> T) -> T {
+    VIEW_CALLS[(call as usize - 7)/2].fetch_add(1, Ordering::Relaxed);
+    ALIAS_CALLS.with_borrow(|calls| {
+        if let Some(calls) = calls {
+            calls[(call as usize - 7) / 2].fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let run = || {
+        let _phase = map_clock::phase(match call {
+            Call::Map => Phase::Map, Call::Unmap => Phase::Unmap,
+            Call::Commit => Phase::Commit, Call::Split => Phase::Split,
+        });
+        f()
+    };
     if !super::dstorage::stream_log::on() {
-        return f();
+        return run();
     }
     let started = std::time::Instant::now();
-    let done = f();
+    let done = run();
     MAPPING[call as usize].fetch_add(1, Ordering::Relaxed);
     MAPPING[call as usize + 1].fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
     done
@@ -1178,34 +1219,288 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
 /// the title maps pages into a pool view, then has the GPU map them into its tiled
 /// heap. Page by page; false if a source page is not mapped physical memory.
 pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
+    serial_alias(to,from,len,None)
+}
+
+#[derive(Default)]
+struct SerialAlias {
+    stats: [u64; 6],
+    times: [u128; 4],
+    groups: usize,
+}
+
+
+static VIEW_CALLS: [AtomicU64;4] = [const{AtomicU64::new(0)};4];
+static VIEW_BATCH: AtomicU64 = AtomicU64::new(1);
+static VIEW_SEQ: AtomicU64 = AtomicU64::new(1);
+static VIEW_FALLBACK: AtomicU64 = AtomicU64::new(0);
+static VIEW_ON: LazyLock<bool> = LazyLock::new(|| std::env::var_os("VICTORY_VIEW_COALESCE").is_some_and(|v| v=="1"));
+static VIEW_TRACE: LazyLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>>=LazyLock::new(||{
+    let path=std::env::var_os("VICTORY_VIEW_TRACE")?;
+    Some(Mutex::new(std::io::BufWriter::with_capacity(256*1024,std::fs::File::create(path).expect("view trace"))))
+});
+thread_local!{
+    static THIS_BATCH: std::cell::Cell<u64>=const{std::cell::Cell::new(0)};
+}
+fn view_line(args:std::fmt::Arguments<'_>){
+    let _phase = map_clock::phase(Phase::Trace);
+    use std::io::Write;
+    if let Some(file)=VIEW_TRACE.as_ref(){
+        let mut file=file.lock().unwrap_or_else(|e|e.into_inner());
+        writeln!(file,"{}",args).expect("write view trace");
+    }
+}
+fn view_page(addr:usize)->u64{
+    static BASE: std::sync::OnceLock<usize>=std::sync::OnceLock::new();
+    let origin=*BASE.get_or_init(||addr/PAGE);
+    (addr/PAGE) as u64+(1u64<<33)-origin as u64
+}
+fn view_room(addr:usize)->usize{
+    let _phase = map_clock::phase(Phase::Query);
+    let mut info:MEMORY_BASIC_INFORMATION=unsafe{std::mem::zeroed()};
+    let got=unsafe{VirtualQueryEx(GetCurrentProcess(),addr as *const c_void,&mut info,std::mem::size_of_val(&info))};
+    if got==0 || info.State!=MEM_RESERVE || info.AllocationProtect!=PAGE_NOACCESS{return 0}
+    (info.BaseAddress as usize).saturating_add(info.RegionSize).saturating_sub(addr)/PAGE
+}
+fn serial_alias(to:u64, from:u64, len:u64, mut probe: Option<&mut SerialAlias>) -> bool {
+    use std::time::Instant;
     let (to, from, len) = (to as usize, from as usize, len as usize);
     let _costed = Costed::begin(None);
     let _busy = Busy::begin();
+    let wait = Instant::now();
     let mut physical = physical();
+    let held = Instant::now();
     // As in `XMemMapPhysicalPages`: no read in place meets the gap.
-    let _changing = victory_gpu::title_memory_remapping();
-    unmap(&mut physical, to, len);
-    for k in (0..len).step_by(PAGE) {
-        if from == 0 {
-            break;
+    let changing = victory_gpu::title_memory_remapping();
+    let editing = Instant::now();
+    let edit_phase=map_clock::edit();
+    let requested = len.div_ceil(PAGE);
+    let aligned = (to|from|len).is_multiple_of(PAGE);
+    let overlap = from != 0 && from < to.saturating_add(len) && to < from.saturating_add(len);
+    let mut observed = Vec::new();
+    if let Some(p) = probe.as_deref_mut() {
+        p.groups += 1;
+        // Snapshot only the target's existing bookkeeping. The unmodified
+        // mapper resolves source pages after it clears the entire destination.
+        // Source slice identity is compared at precisely that original point.
+        // For non-overlapping ranges, a live source Section already owns its
+        // allocation. A dead old Section cannot be reused as a source here:
+        // PHYSICAL excludes changes to the view table until the call returns.
+        if aligned && !overlap {
+            observed.reserve(requested);
+            for k in (0..len).step_by(PAGE) {
+                let addr=to+k;
+                let old=physical.views.range(..=addr).next_back().filter(|(base,(size,_))| addr < **base+size)
+                    .map(|(base,(_,s))| (Arc::as_ptr(&s.section) as usize,s.index+(addr-base)/PAGE));
+                observed.push(old);
+            }
         }
-        let at = from + k;
-        let Some(slice) = physical.slice_at(at) else {
-            return false;
-        };
-        if !map(&mut physical, to + k, PAGE, slice) {
-            return false;
+        if from==0 {
+            if aligned {
+                for old in &observed { p.stats[if old.is_some(){4}else{3}] += 1; }
+            } else { p.stats[5] += requested as u64; }
         }
     }
-    true
+
+    let batch=THIS_BATCH.with(|v|v.get());
+    let seq=VIEW_SEQ.fetch_add(1,Ordering::Relaxed);
+    view_line(format_args!("S\t{seq}\t{batch}\t{}",if from==0 {0} else {view_page(from)}));
+    unmap(&mut physical, to, len);
+    let mut ok=true;
+    if from==0 {
+        view_line(format_args!("R\t{seq}\t{batch}\t{}\t{requested}\t0\t0\t0",view_page(to)));
+    } else {
+        let mut k=0;
+        while k<len {
+            let at=from+k;
+            let Some(first)=physical.slice_at(at) else {
+                if let Some(p)=probe.as_deref_mut(){p.stats[5]+=1;}
+                view_line(format_args!("F\t{seq}\t{batch}\t{}",view_page(to+k)));
+                ok=false; break;
+            };
+            let target=to+k;
+            let mut run=1;
+            if aligned && !overlap{
+                // Never look ahead across the original range or a physical view boundary.
+                // A source view's underlying section and offsets are consecutive by construction.
+                let (&src_base,(size,_))=physical.views.range(..=at).next_back().unwrap();
+                let available=((src_base+size-at)/PAGE).min((len-k)/PAGE);
+                run=available.max(1);
+                // Adjacent source views may belong to exactly the same section and next offset.
+                while run < (len-k)/PAGE {
+                    let next=at+run*PAGE;
+                    let Some((size,slice))=physical.views.get(&next) else {break};
+                    if !Arc::ptr_eq(&first.section,&slice.section)||slice.index!=first.index+run{break}
+                    let extra=(size/PAGE).min((len-k)/PAGE-run);
+                    if extra==0{break}
+                    run+=extra;
+                }
+            }
+            let room=view_room(target);
+            let attempt=run.min(room.max(1));
+            view_line(format_args!("R\t{seq}\t{batch}\t{}\t{attempt}\t{}\t{}\t{room}",
+                view_page(target),first.section.trace_section_id,first.index));
+            if let Some(p)=probe.as_deref_mut(){
+                for j in 0..attempt {
+                    let category=match observed.get(k/PAGE+j) {
+                        Some(Some((sec,idx))) if *sec==Arc::as_ptr(&first.section) as usize && *idx==first.index+j=>0,
+                        Some(Some(_))=>1, Some(None)=>2, None=>5
+                    };p.stats[category]+=1;
+                }
+            }
+            let mut mapped=false;
+            if *VIEW_ON && attempt>1{
+                mapped=map(&mut physical,target,attempt*PAGE,first.clone());
+                if !mapped {VIEW_FALLBACK.fetch_add(1,Ordering::Relaxed);}
+            }
+            if !mapped{
+                for j in 0..attempt{
+                    if !map(&mut physical,target+j*PAGE,PAGE,Slice{section:first.section.clone(),index:first.index+j}){
+                        ok=false;break;
+                    }
+                }
+            }
+            if !ok{break}
+            k+=attempt*PAGE;
+        }
+    }
+    drop(changing);
+    drop(edit_phase);
+    let edited=Instant::now();
+    drop(physical);
+    if let Some(p) = probe {
+        p.times[0] += (held-wait).as_nanos();
+        p.times[1] += (editing-held).as_nanos();
+        p.times[2] += (edited-editing).as_nanos();
+        p.times[3] += held.elapsed().as_nanos();
+    }
+    ok
 }
 
+// Experimental: combines only calls which would all introduce brand-new aliases.
+// A neighbouring guest range retaining any existing bytes is always left on the
+// original path. Consecutive source VAs are required as well as section offsets.
+static CROSS_ON: LazyLock<bool>=LazyLock::new(||std::env::var_os("VICTORY_VIEW_COALESCE").is_some_and(|v|v=="2"));
+fn cross_candidate(items:&[(u64,u64,u64)], probe:&mut SerialAlias, batch:u64)->Option<usize>{
+    use std::time::Instant;
+    let &(to,from,bytes)=items.first()?;
+    if from==0 || bytes as usize!=PAGE || (to | from) % PAGE as u64 != 0{return None}
+    let linear=items.iter().take(64).enumerate().take_while(|&(j,&(d,s,n))| {
+        n as usize==PAGE && to.checked_add((j*PAGE)as u64)==Some(d) && from.checked_add((j*PAGE)as u64)==Some(s)
+    }).count();
+    if linear<2{return None}
+    let to=to as usize;let from=from as usize;
+    if from<to.checked_add(linear*PAGE)? && to<from.checked_add(linear*PAGE)?{return None}
+    struct TrialTime<'a> { ticks:&'a mut [u128;4], start:Instant, phys:Option<Instant>, edit_wait:Option<Instant>, edit:Option<Instant> }
+    impl Drop for TrialTime<'_>{
+        fn drop(&mut self){let done=Instant::now();if let Some(p)=self.phys {
+            self.ticks[0]+=(p-self.start).as_nanos();self.ticks[3]+=(done-p).as_nanos();
+        }if let (Some(w),Some(e))=(self.edit_wait,self.edit){
+            self.ticks[1]+=(e-w).as_nanos();self.ticks[2]+=(done-e).as_nanos();
+        }}
+    }
+    let mut clock=TrialTime{ticks:&mut probe.times,start:Instant::now(),phys:None,edit_wait:None,edit:None};
+    let mut phys=physical();
+    clock.phys=Some(Instant::now());
+    let first=phys.slice_at(from)?;
+    // PHYSICAL prevents changes to the section/source mappings during these checks.
+    let mut valid=0;
+    for j in 0..linear{
+        if phys.slice_at(to+j*PAGE).is_some(){break}
+        let Some(s)=phys.slice_at(from+j*PAGE) else{break};
+        if !Arc::ptr_eq(&s.section,&first.section)||s.index!=first.index+j{break}
+        valid+=1;
+    }
+    if valid<2{return None}
+    let _edit_phase; // Declared before the guard so it measures guard cleanup too.
+    clock.edit_wait=Some(Instant::now());
+    let _changing=victory_gpu::title_memory_remapping();
+    clock.edit=Some(Instant::now());
+    _edit_phase=map_clock::edit();
+    let room=view_room(to);
+    let n=valid.min(room);
+    view_line(format_args!("T\t{batch}\t{}\t{linear}\t{valid}\t{room}",view_page(to)));
+    if n<2{return None}
+    let sid=first.section.trace_section_id;let src=first.index;
+    if !map(&mut phys,to,n*PAGE,first){
+        VIEW_FALLBACK.fetch_add(1,Ordering::Relaxed);
+        view_line(format_args!("J\t{batch}\t{}\t{n}\t0",view_page(to)));
+        return None
+    }
+    view_line(format_args!("J\t{batch}\t{}\t{n}\t1",view_page(to)));
+    for j in 0..n{
+        let seq=VIEW_SEQ.fetch_add(1,Ordering::Relaxed);
+        view_line(format_args!("S\t{seq}\t{batch}\t{}",view_page(from+j*PAGE)));
+        view_line(format_args!("R\t{seq}\t{batch}\t{}\t1\t{sid}\t{}\t{}",view_page(to+j*PAGE),src+j,room-j));
+    }
+    probe.groups+=1;probe.stats[2]+=n as u64;
+    Some(n)
+}
 /// [`map_alias`] of many ranges, in order.
 pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
     let _costed = Costed::begin(None);
+    use std::time::Instant;
+    if *map_clock::ENABLED {
+        static CAL: std::sync::Once=std::sync::Once::new();
+        CAL.call_once(|| {
+            let (hz,iterations,median_ticks)=map_clock::calibrate();
+            view_line(format_args!("PCAL\t{hz}\t{iterations}\t{median_ticks}\t{}",map_clock::NAMES));
+        });
+    }
+    map_clock::begin();
+    let started = Instant::now();
+    let qpc = || {
+        let mut ticks = 0i64;
+        unsafe { windows_sys::Win32::System::Performance::QueryPerformanceCounter(&mut ticks) };
+        ticks
+    };
+    let qpc_start = qpc();
+    let view_batch=VIEW_BATCH.fetch_add(1,Ordering::Relaxed);
+    THIS_BATCH.with(|b|b.set(view_batch));
+    let calls: AliasCalls = Arc::new(std::array::from_fn(|_| AtomicU64::new(0)));
+    let _scope = AliasScope::enter(Some(calls.clone()));
+    let mut stats = [0u64; 6]; // same, changed, first, absent, clear, unknown
+    let mut times = [0u128; 4]; // physical wait, edit wait, edit held, physical held
+    let mut groups = 0usize;
+    let pages_requested = ranges.iter().map(|r| r.2.div_ceil(PAGE as u64)).sum::<u64>();
+    let report = |stats: &[u64;6], times: &[u128;4], groups: usize, serial: bool, ok: bool| {
+        let [unmaps,splits,maps,commits] = calls.each_ref().map(|v| v.load(Ordering::Relaxed));
+        let qpc_end=qpc();
+        if let Some(phases)=map_clock::finish() {
+            let csv=|v:&[u64]| v.iter().map(u64::to_string).collect::<Vec<_>>().join(",");
+            view_line(format_args!("P\t{view_batch}\t{qpc_start}\t{qpc_end}\t{}\t{}\t{}\t{}\t{}",
+                times[2],phases.edits,csv(&phases.ticks),csv(&phases.entries),csv(&phases.max_slice)));
+        }
+        THIS_BATCH.with(|b|b.set(0));
+        let totals=VIEW_CALLS.each_ref().map(|n|n.load(Ordering::Relaxed));
+        view_line(format_args!("E\t{view_batch}\t{qpc_start}\t{qpc_end}\t{}\t{}\t{}\t{}\t{}\t{}",
+            totals[0],totals[1],totals[2],totals[3],VIEW_FALLBACK.load(Ordering::Relaxed),ok));
+        if let Some(f)=VIEW_TRACE.as_ref(){use std::io::Write;f.lock().unwrap_or_else(|e|e.into_inner()).flush().expect("flush");}
+        let tid=unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+        let classified_pages=stats.iter().sum::<u64>();
+        tracing::info!(tid,qpc_start,qpc_end,view_batch,ranges=ranges.len(), pages=pages_requested, groups,serial,
+            same=stats[0], changed=stats[1], first=stats[2], absent=stats[3], clear=stats[4], unknown=stats[5], fallback=false,
+            classified_pages, unattempted_pages=pages_requested.saturating_sub(classified_pages),
+            map_calls=maps, unmap_calls=unmaps, split_calls=splits, commit_calls=commits,
+            phys_wait_us=times[0] as u64 /1000, edit_wait_us=times[1] as u64 /1000,
+            edit_hold_us=times[2] as u64 /1000, phys_hold_us=times[3] as u64 /1000,
+            elapsed_us=started.elapsed().as_micros() as u64, ok, "alias probe");
+        ok
+    };
     lift_thread();
     if side_by_side() <= 1 {
-        return ranges.iter().all(|&(to, from, len)| map_alias(to, from, len));
+        let mut p=SerialAlias::default();
+        let mut ok=true;
+        let mut at=0;
+        while at<ranges.len(){
+            if *CROSS_ON {
+                if let Some(n)=cross_candidate(&ranges[at..],&mut p,view_batch){at+=n;continue;}
+            }
+            let (to,from,len)=ranges[at];
+            if !serial_alias(to,from,len,Some(&mut p)){ok=false;break}
+            at+=1;
+        }
+        return report(&p.stats,&p.times,p.groups,true,ok);
     }
     // By the page: the address, and the one whose page it is to show.
     let pages: Vec<(usize, Option<usize>)> = ranges
@@ -1215,13 +1510,19 @@ pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
         })
         .collect();
     if pages.iter().any(|p| p.0 % PAGE != 0 || p.1.is_some_and(|from| from % PAGE != 0)) {
-        return ranges.iter().all(|&(to, from, len)| map_alias(to, from, len));
+        let mut p=SerialAlias::default();
+        let ok = ranges.iter().all(|&(to, from, len)| serial_alias(to, from, len,Some(&mut p)));
+        return report(&p.stats,&p.times,p.groups,true,ok);
     }
     let mut ok = true;
     let mut at = 0;
     while at < pages.len() {
         let _busy = Busy::begin();
+        let waiting = Instant::now();
         let mut physical = physical();
+        let held = Instant::now();
+        times[0] += (held-waiting).as_nanos();
+        groups += 1;
         let mut ops: Vec<Op> = Vec::new();
         let mut touched = std::collections::HashSet::new();
         for &(to, from) in &pages[at..] {
@@ -1231,15 +1532,34 @@ pub fn map_aliases(ranges: &[(u64, u64, u64)]) -> bool {
                 break;
             }
             let slice = from.map(|from| physical.slice_at(from));
+            let old = physical.views.range(..=to).next_back().filter(|(base,(len,_))| to < **base + len)
+                .map(|(base,(_,s))| (&s.section, s.index + (to - base) / PAGE));
+            let category = match (&slice, old) {
+                (Some(Some(wanted)), Some((section,index))) if Arc::ptr_eq(&wanted.section,section) && wanted.index==index => 0,
+                (Some(Some(_)),Some(_)) => 1,
+                (Some(Some(_)),None) => 2,
+                (None,None) => 3,
+                (None,Some(_)) => 4,
+                (Some(None),_) => 5,
+            };
+            stats[category] += 1;
             ok &= !matches!(slice, Some(None));
             touched.insert(to);
             ops.push(Op::new(to, slice.flatten()));
             at += 1;
         }
-        let _changing = victory_gpu::title_memory_remapping();
+        let edit_waiting = Instant::now();
+        let changing = victory_gpu::title_memory_remapping();
+        let editing = Instant::now();
+        times[1] += (editing-edit_waiting).as_nanos();
         ok &= change(&mut physical, ops);
+        drop(changing);
+        let edited = Instant::now();
+        times[2] += (edited-editing).as_nanos();
+        drop(physical);
+        times[3] += held.elapsed().as_nanos();
     }
-    ok
+    report(&stats,&times,groups,false,ok)
 }
 
 /// Maps (page number not 0) or unmaps each address; false if a page is not
@@ -1386,15 +1706,17 @@ struct Op {
     had: bool,
     /// The placeholder is the page's own (or will be, after the unmapping).
     own: bool,
+    alias_calls: Option<AliasCalls>,
 }
 
 impl Op {
     fn new(at: usize, slice: Option<Slice>) -> Op {
-        Op { at, slice, had: false, own: false }
+        Op { at, slice, had: false, own: false, alias_calls: ALIAS_CALLS.with_borrow(Clone::clone) }
     }
 
     /// The system calls; whether the host did as asked.
     fn run(&self) -> bool {
+        let _worker_scope = self.alias_calls.as_ref().map(|c| AliasScope::enter(Some(c.clone())));
         if self.had {
             // SAFETY: a view we mapped; it becomes a placeholder again.
             let gone = counted(Call::Unmap, || unsafe {
@@ -1587,7 +1909,7 @@ mod pool {
             .ops
             .iter()
             .map(|(op, done)| {
-                let op = Op { at: op.at, slice: op.slice.clone(), had: op.had, own: op.own };
+                let op = Op { at: op.at, slice: op.slice.clone(), had: op.had, own: op.own, alias_calls: op.alias_calls.clone() };
                 (op, done.load(Ordering::Acquire))
             })
             .collect()
@@ -1597,19 +1919,20 @@ mod pool {
 /// Maps `slice` and the slices after it over `[base, base + len)`, which
 /// must lie in one placeholder.
 fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
-    let own = physical.holes.remove(&base) == Some(len) && lean();
+    let own = { let _p=map_clock::phase(Phase::ViewTable); physical.holes.remove(&base) == Some(len) && lean() };
     if !show(base, len, &slice, own) {
         return false;
     }
     // Noted before the GPU side is told: bytes DirectStorage put in earlier,
     // without notice at these addresses ([`pages_written`]), are there by
     // the time the copies of them go.
-    shown_mut().note(base, len, &slice);
+    view_line(format_args!("M\t{}\t{}\t{}\t{}\t{}",THIS_BATCH.with(|b|b.get()),view_page(base),len/PAGE,slice.section.trace_section_id,slice.index));
+    { let _p=map_clock::phase(Phase::ShownNote); shown_mut().note(base, len, &slice); }
     // New contents, read-write: the GPU side's copies no longer guard it.
     victory_gpu::title_memory_remapped(base, len);
     // What the range shows now, for the GPU side's in-place census.
     victory_gpu::title_memory_view(base, len, slice.section.handle as usize, (slice.index * PAGE) as u64);
-    physical.views.insert(base, (len, slice));
+    { let _p=map_clock::phase(Phase::ViewTable); physical.views.insert(base, (len, slice)); }
     true
 }
 
@@ -1739,6 +2062,7 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
     let end = base + len;
     // Views do not overlap: the one holding `base`, then those starting
     // inside (the GPU's page mappings make one view per page).
+    let index_phase=map_clock::phase(Phase::ViewTable);
     let first = physical
         .views
         .range(..=base)
@@ -1749,11 +2073,13 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
         .into_iter()
         .chain(physical.views.range(base + 1..end).map(|(at, _)| *at))
         .collect();
+    drop(index_phase);
     for at in hit {
-        let Some((size, slice)) = physical.views.remove(&at) else {
+        let old = { let _p=map_clock::phase(Phase::ViewTable); physical.views.remove(&at) };
+        let Some((size, slice)) = old else {
             continue;
         };
-        shown_mut().forget(at, size, &slice);
+        { let _p=map_clock::phase(Phase::ShownForget); shown_mut().forget(at, size, &slice); }
         if at < base || at + size > end {
             // Parts of it stay, and are mapped again below.
             victory_gpu::title_memory_splitting(at, size);
@@ -1769,15 +2095,19 @@ fn unmap(physical: &mut Physical, base: usize, len: usize) {
                 MEM_PRESERVE_PLACEHOLDER,
             )
         });
+        if gone!=0{view_line(format_args!("U\t{}\t{}\t{}",THIS_BATCH.with(|b|b.get()),view_page(at),size/PAGE));} else {view_line(format_args!("UF\t{}\t{}\t{}",THIS_BATCH.with(|b|b.get()),view_page(at),size/PAGE));}
         if gone != 0 && at >= base && at + size <= end {
+            let _p=map_clock::phase(Phase::ViewTable);
             physical.holes.insert(at, size);
         }
         if at < base {
-            map(physical, at, base - at, slice.clone());
+            let _repair=map_clock::restoring();
+            if !map(physical,at,base-at,slice.clone()){view_line(format_args!("SF\t{}\t{}\t{}",THIS_BATCH.with(|b|b.get()),view_page(at),(base-at)/PAGE));}
         }
         if at + size > end {
+            let _repair=map_clock::restoring();
             let index = slice.index + (end - at) / PAGE;
-            map(physical, end, at + size - end, Slice { index, ..slice });
+            if !map(physical,end,at+size-end,Slice{index,..slice}){view_line(format_args!("SF\t{}\t{}\t{}",THIS_BATCH.with(|b|b.get()),view_page(end),(at+size-end)/PAGE));}
         }
     }
 }

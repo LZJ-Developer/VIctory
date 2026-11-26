@@ -792,14 +792,26 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
             .collect();
         // Buffers have host copies, not resources the barrier can name:
         // a barrier on one waits for every shader write before it.
-        if barriers.iter().any(|b| {
+        let buffer_wait = barriers.iter().any(|b| {
             b.kind != 1 && !b.first.is_null() && crate::resource::buffer_bytes(b.first).is_some()
-        }) {
+        });
+        if buffer_wait {
             host.push(UAV_BARRIER);
             #[cfg(feature = "diagnostics")]
             crate::copystat::add(crate::copystat::C::WaitsForBuffers, 1);
         }
         if !host.is_empty() {
+            #[cfg(feature = "diagnostics")]
+            list.focus_barrier(|| {
+                let is_global = |b: &Barrier| b.kind == 2 && b.first.is_null();
+                let global = host.iter().filter(|b| is_global(b)).count() as u32;
+                let named = host.iter().filter(|b| b.kind == 2 && !b.first.is_null()).count() as u32;
+                let adjacent_global = host.windows(2).filter(|w| is_global(&w[0]) && is_global(&w[1])).count() as u32;
+                crate::host::focus_dispatch::BarrierOp::Legacy {
+                    global: global - u32::from(buffer_wait), buffer: u32::from(buffer_wait),
+                    named, other: host.len() as u32 - global - named, adjacent_global,
+                }
+            });
             use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BARRIER;
             const _: () = assert!(size_of::<Barrier>() == size_of::<D3D12_RESOURCE_BARRIER>());
             // SAFETY: the same layout; borrowed resource pointers, never
@@ -1580,6 +1592,8 @@ extern "system" fn sync(this: This, flags: u32, control: u32, address: u64, size
                 }
                 crate::copystat::add(crate::copystat::C::WaitsForGroups, 1);
             }
+            #[cfg(feature = "diagnostics")]
+            list.focus_barrier(|| crate::host::focus_dispatch::BarrierOp::Sync { has_range: address != 0 && size != 0 });
             // SAFETY: the same layout; no resource named.
             let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
             // SAFETY: an open list.
@@ -2153,6 +2167,8 @@ extern "system" fn barrier_groups(this: This, count: u32, _groups: *const u8) {
     {
         use windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_BARRIER;
         with_state(this, |_, state| state.synced());
+        #[cfg(feature = "diagnostics")]
+        list.focus_barrier(|| crate::host::focus_dispatch::BarrierOp::Group { has_payload: !_groups.is_null() });
         // SAFETY: the same layout; no resource named.
         let barrier = unsafe { std::mem::transmute::<Barrier, D3D12_RESOURCE_BARRIER>(UAV_BARRIER) };
         // SAFETY: an open list.

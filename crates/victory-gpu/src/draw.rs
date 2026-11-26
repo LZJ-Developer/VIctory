@@ -3132,6 +3132,8 @@ impl State {
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
         #[cfg(feature = "diagnostics")]
+        list.focus_op(|| self.focus_text(format!("dispatch {x}x{y}x{z}")));
+        #[cfg(feature = "diagnostics")]
         if crate::pipeline::is_builder(self.pipeline as This) {
             crate::capture::op(list as *const _ as usize, || format!("builder {}", p.name));
             self.list_dropped_roots([x, y, z]);
@@ -3153,8 +3155,36 @@ impl State {
                 unsafe { list.list.SetComputeRoot32BitConstant(param, threads[0], word) };
             }
         }
+        #[cfg(feature = "diagnostics")]
+        let z = dot_family_probe(list, p, [x, y, z]);
         // SAFETY: an open list with everything set.
+        #[cfg(feature = "diagnostics")]
+        if (crate::pipeline::host::hot_buffer_probe() || crate::pipeline::host::load4_on()) && p.stages.first().is_some_and(|stage| stage.shader.hash == "8cbd7f5b9ce7530c") {
+            self.load4_heap_bindings([x, y, z]);
+        }
+        #[cfg(feature = "diagnostics")]
+        let load4_choice = p.load4.as_ref().map(|candidate| {
+            // The title can release its pipeline before submission; retain the
+            // candidate in both A and B so each timed arm has matching CPU work.
+            list.keep(candidate);
+            let select = crate::pipeline::host::load4_selected();
+            // Both A and B bind explicitly. Keep the cached PSO assumption on return.
+            unsafe { list.list.SetPipelineState(if select { candidate } else { &p.pso }) };
+            list.dot_probe_record(select);
+            select
+        });
+        #[cfg(feature = "diagnostics")]
+        let at = crate::host::focus_dispatch::broad().then(|| list.focus_dispatch_begin(&format!("dispatch|{}",p.name), [x, y, z], load4_choice == Some(true))).flatten();
         unsafe { list.list.Dispatch(x, y, z) };
+        #[cfg(feature = "diagnostics")]
+        if let Some(at) = at {
+            list.focus_dispatch_end(at);
+        }
+        #[cfg(feature = "diagnostics")]
+        if load4_choice.is_some() {
+            // SAFETY: restore the live PSO belonging to the bound pipeline.
+            unsafe { list.list.SetPipelineState(&p.pso) };
+        }
         self.buffers_written();
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
@@ -3163,6 +3193,33 @@ impl State {
         {
             self.host_pipeline = 0;
             self.host_roots[1] = 0;
+        }
+    }
+
+    /// Snapshot the actual heap and the translated root constants at recording.
+    #[cfg(feature = "diagnostics")]
+    fn load4_heap_bindings(&self, groups: [u32; 3]) {
+        static SEEN: AtomicU64 = AtomicU64::new(0);
+        let hit = SEEN.fetch_add(1, Ordering::Relaxed);
+        if hit >= 6 && (!hit.is_multiple_of(32) || hit >= 1024) {
+            return;
+        }
+        // bind() chooses the last non-sampler heap and otherwise a host fallback.
+        let views = self.host_heaps.iter().rev().copied().filter(|h| *h != 0)
+            .map(|h| crate::descriptor::heap(h as This))
+            .filter(|heap| !heap.samplers())
+            .find_map(|heap| heap.host());
+        let u4 = self.user.get(4).copied();
+        let u5 = self.user.get(5).copied();
+        let frame = crate::frame::current();
+        for (role, word, delta) in [("uav", u4, 352u32), ("srv", u5, 576u32)] {
+            let index = word.map(|word| (word.wrapping_add(delta) >> 5).min(999_999));
+            let backing = match (views, index) {
+                (Some(heap), Some(slot)) => heap.load4_slot_backing(slot),
+                (None, _) => "bound title view heap unavailable (fallback possible); kept_in=unavailable".to_owned(),
+                (_, None) => "root word unavailable; kept_in=unavailable".to_owned(),
+            };
+            tracing::info!(frame, hit, ?groups, ?u4, ?u5, role, ?index, backing = %backing, "load4 bound heap");
         }
     }
 
@@ -3230,6 +3287,14 @@ impl State {
     /// (diagnostics): the pipeline, then per stage the user data it gets
     /// (with the view at that heap index, if one is), the host addresses
     /// of its root views and the views its tables name.
+    #[cfg(feature = "diagnostics")]
+    fn focus_text(&self, kind: String) -> String {
+        match crate::pipeline::host_pipeline(self.pipeline as This) {
+            Some(pipeline) => format!("{kind} {}", pipeline.name),
+            None => kind,
+        }
+    }
+
     #[cfg(feature = "diagnostics")]
     fn op_text(&self, kind: String, compute: bool) -> String {
         use std::fmt::Write;
@@ -3490,6 +3555,8 @@ impl State {
                 Ok(l6) => {
                     #[cfg(feature = "diagnostics")]
                     list.note_op(|| self.op_text(format!("mesh {x}"), false));
+                    #[cfg(feature = "diagnostics")]
+                    list.focus_op(|| self.focus_text(format!("mesh {x}")));
                     self.mesh_scissor(list, true);
                     #[cfg(feature = "diagnostics")]
                     if let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) {
@@ -3501,7 +3568,11 @@ impl State {
                         once!(x, "a mesh dispatch of more groups than the host takes: cut");
                     }
                     // SAFETY: an open list with everything set.
-                    unsafe { l6.DispatchMesh(x.min(65_535), 1, 1) };
+                    #[cfg(feature = "diagnostics")]
+        let broad_at=crate::host::focus_dispatch::broad().then(||list.focus_dispatch_begin(&self.focus_text("mesh|".to_owned()), [0;3], false)).flatten();
+        unsafe { l6.DispatchMesh(x.min(65_535), 1, 1) };
+        #[cfg(feature = "diagnostics")]
+        if let Some(at)=broad_at {list.focus_dispatch_end(at);}
                     self.drew(crate::pipeline::host_pipeline(self.pipeline as This));
                     self.mesh_scissor(list, false);
                     DRAWN.fetch_add(1, Ordering::Relaxed);
@@ -3972,11 +4043,17 @@ impl State {
             };
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("draw {count}x{instances}"), false));
+            #[cfg(feature = "diagnostics")]
+            list.focus_op(|| self.focus_text(format!("draw {count}x{instances}")));
             // SAFETY: an open list with everything set.
-            unsafe {
+            #[cfg(feature = "diagnostics")]
+        let broad_at=crate::host::focus_dispatch::broad().then(||list.focus_dispatch_begin(&self.focus_text("draw|".to_owned()), [0;3], false)).flatten();
+        unsafe {
                 list.list
                     .DrawInstanced(count, instances, from, first_instance)
             };
+        #[cfg(feature = "diagnostics")]
+        if let Some(at)=broad_at {list.focus_dispatch_end(at);}
             self.drew(crate::pipeline::host_pipeline(self.pipeline as This));
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
@@ -4077,11 +4154,17 @@ impl State {
         if ran {
             #[cfg(feature = "diagnostics")]
             list.note_op(|| self.op_text(format!("indexed {indices}x{instances}"), false));
+            #[cfg(feature = "diagnostics")]
+            list.focus_op(|| self.focus_text(format!("indexed {indices}x{instances}")));
             // SAFETY: an open list with everything set.
-            unsafe {
+            #[cfg(feature = "diagnostics")]
+        let broad_at=crate::host::focus_dispatch::broad().then(||list.focus_dispatch_begin(&self.focus_text("indexed|".to_owned()), [0;3], false)).flatten();
+        unsafe {
                 list.list
                     .DrawIndexedInstanced(indices, instances, first, base, first_instance)
             };
+        #[cfg(feature = "diagnostics")]
+        if let Some(at)=broad_at {list.focus_dispatch_end(at);}
             self.drew(crate::pipeline::host_pipeline(self.pipeline as This));
             DRAWN.fetch_add(1, Ordering::Relaxed);
         }
@@ -4356,12 +4439,16 @@ impl State {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
         #[cfg(feature = "diagnostics")]
+        list.focus_op(|| format!("indirect kind {kind} max {max} {}", p.name));
+        #[cfg(feature = "diagnostics")]
         list.ran_indirect(p.pso.as_raw() as usize, &p.name, kind, max, &self.user);
         if kind == MESH {
             self.mesh_scissor(list, true);
         }
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
+        #[cfg(feature = "diagnostics")]
+        let broad_at=crate::host::focus_dispatch::broad().then(||list.focus_dispatch_begin(&format!("indirect{}|{}",kind,p.name), [0;3], false)).flatten();
         unsafe {
             list.list.ExecuteIndirect(
                 &signature,
@@ -4372,6 +4459,8 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
+        #[cfg(feature = "diagnostics")]
+        if let Some(at)=broad_at {list.focus_dispatch_end(at);}
         if kind == MESH {
             self.mesh_scissor(list, false);
         }
@@ -4407,6 +4496,38 @@ fn thread_dimensions() -> bool {
 /// The groups of `size` threads that hold `threads`.
 fn dispatch_groups(threads: [u32; 3], size: [u32; 3]) -> [u32; 3] {
     std::array::from_fn(|i| threads[i].div_ceil(size[i]))
+}
+
+/// Diagnostic ablation of the eleven recorded INT8 kernels in one hot list.
+/// Match the original grid as well as the shader to exclude other uses. A zero
+/// Z dimension intentionally leaves stale outputs. Keep bindings, barriers and
+/// the guest write declarations in place so only the actual launch is changed.
+#[cfg(feature = "diagnostics")]
+fn dot_family_probe(list: &HostList, pipeline: &HostPipeline, groups: [u32; 3]) -> u32 {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    static BIT: OnceLock<Option<u32>> = OnceLock::new();
+    let Some(bit) = *BIT.get_or_init(|| crate::ab::bit("VICTORY_TEST_DOT_FAMILY")) else {
+        return groups[2];
+    };
+    let Some(stage) = pipeline.stages.first() else { return groups[2] };
+    let expected = match stage.shader.hash.as_str() {
+        "f46117391dd81461" | "f7fc6c984427fef3" => [15, 540, 1],
+        "8cbd7f5b9ce7530c" | "32aa8384586e0f12" | "8e614708143ef917" | "528278df1274cb33" => [15, 270, 1],
+        "47d8c225abfcb246" => [1013, 1, 1],
+        "17af85f170e66f30" | "477b52e73ddeb6f2" | "8b437ab61d8008fe" => [507, 1, 1],
+        "fdce2a0a9fb1521a" => [60, 34, 1],
+        _ => return groups[2],
+    };
+    if groups != expected {
+        return groups[2];
+    }
+    static FIRST: OnceLock<Instant> = OnceLock::new();
+    let warm = FIRST.get_or_init(Instant::now).elapsed() >= Duration::from_secs(45);
+    let zero = warm && crate::ab::on(bit);
+    list.dot_probe_record(zero);
+    if zero { 0 } else { groups[2] }
 }
 
 /// Where a compute pipeline's user data has a word the host computes: the

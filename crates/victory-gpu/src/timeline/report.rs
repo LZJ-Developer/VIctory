@@ -775,6 +775,12 @@ pub(super) fn write(file: &std::path::Path, data: Data, before: &Threads, after:
     let mut names = Names::new();
     let (events, lost) = (data.events.len(), data.lost);
     let trace = Trace::new(data.events, &stamps);
+    let qpc_pre = super::record::ticks();
+    let utc_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default().as_nanos() as u64;
+    let qpc_post = super::record::ticks();
+    tracing::info!(file=%file.display(),zero=trace.events.first().map_or(0, |e| e.t0),
+        qpc_pre,qpc_post,utc_ns,qpc_hz=frequency(),"broad UTC calibration");
     let mut text = summary(&trace, &mut names, &data.stacks, before, after);
     if lost > 0 {
         let _ = writeln!(text, "\n{lost} events were lost: the buffer was full");

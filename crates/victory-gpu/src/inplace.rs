@@ -273,6 +273,9 @@ struct Views {
     pages: BTreeMap<(usize, u64), Vec<usize>>,
     /// Of those, how many are shown more than once.
     pages_twice: usize,
+    fingerprint_history: BTreeMap<usize, (u64, u64, u32, u32)>,
+    section_ids: BTreeMap<usize, u64>,
+    next_section: u64,
     /// Sections by handle: bytes, and whether made committed.
     sections: Vec<(usize, u64, bool)>,
     /// Our own view of a whole section, by its handle (0: the host gave
@@ -286,6 +289,8 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
     views: BTreeMap::new(),
     pages: BTreeMap::new(),
     pages_twice: 0,
+    fingerprint_history: BTreeMap::new(),
+    section_ids: BTreeMap::new(), next_section: 0,
     sections: Vec::new(),
     whole: Vec::new(),
 });
@@ -302,6 +307,9 @@ fn views_mut() -> std::sync::RwLockWriteGuard<'static, Views> {
 /// if with `SEC_COMMIT` (only such a section can be opened as a heap).
 pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
     let mut v = views_mut();
+    v.next_section += 1;
+    let id=v.next_section;
+    v.section_ids.insert(section,id);
     v.sections.retain(|s| s.0 != section);
     // A handle's number given out again: the view was of the section that
     // had it before (it stays mapped: someone may be writing through it).
@@ -328,10 +336,19 @@ pub fn title_memory_section_gone(section: usize) {
 /// The runtime mapped `[at, at + len)` as a view of `section` from
 /// `offset` on. Call after [`crate::title_memory_remapped`] of the range.
 pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
+    let _phase=crate::map_clock::phase(crate::map_clock::Phase::ViewAdded);
     {
         let mut v = views_mut();
         v.views.insert(at, (len, section, offset));
         for k in 0..len.div_ceil(K64) {
+            let page = at + k * K64;
+            let pos = offset + (k * K64) as u64;
+            if crate::fingerprint_dual::in_window(page) {
+                let id = v.section_ids.get(&section).copied().unwrap_or(0);
+                let record = v.fingerprint_history.entry(page).or_insert((id,pos,0,0));
+                record.3 += u32::from((record.0,record.1)!=(id,pos));
+                *record=(id,pos,record.2+1,record.3);
+            }
             let shown = v.pages.entry((section, offset + (k * K64) as u64)).or_default();
             shown.push(at + k * K64);
             let twice = shown.len() == 2;
@@ -341,6 +358,7 @@ pub fn title_memory_view(at: usize, len: usize, section: usize, offset: u64) {
     // This view is writable from now on: a guard over the same bytes at
     // another view must look at them again, and the pages are noted written
     // there (`crate::watch`).
+    let _mapped=crate::map_clock::phase(crate::map_clock::Phase::ViewsMapped);
     crate::watch::views_mapped(section, offset, len);
 }
 
@@ -411,6 +429,21 @@ pub(crate) fn pages_of(page: usize) -> Vec<usize> {
         return Vec::new();
     }
     v.pages.get(&(section, offset + within as u64)).cloned().unwrap_or_default()
+}
+
+// Snapshot the identity of this 64 KiB guest page under the caller's mapping
+// read guard. The other VA must show this exact section offset concurrently.
+pub(crate) fn fingerprint_page(page: usize) -> (bool, Option<usize>, u32, u32) {
+    let v=views();
+    let (_,_,installs,changes)=v.fingerprint_history.get(&page).copied().unwrap_or_default();
+    let Some((&first,&(bytes,section,offset)))=v.views.range(..=page).next_back() else {
+        return (false,None,installs,changes);
+    };
+    let within=page-first;
+    if within>=bytes { return (false,None,installs,changes); }
+    let other=v.pages.get(&(section,offset+within as u64)).and_then(|aliases|
+        aliases.iter().copied().find(|&a| a!=page && !crate::fingerprint_dual::in_window(a)));
+    (true,other,installs,changes)
 }
 
 /// The title views that show any of the physical bytes `[offset, offset +

@@ -382,6 +382,8 @@ pub(crate) struct HostPipeline {
     /// A mesh pipeline (graphics without vertex input).
     pub(crate) mesh: bool,
     pub(crate) pso: ID3D12PipelineState,
+    #[cfg(feature = "diagnostics")]
+    pub(crate) load4: Option<ID3D12PipelineState>,
     pub(crate) root: ID3D12RootSignature,
     /// Vertex, then pixel stage, or the compute stage.
     pub(crate) stages: Vec<Stage>,
@@ -409,6 +411,82 @@ fn refuse(reason: &'static str, shaders: &[Arc<Shader>]) -> Option<HostPipeline>
         tracing::warn!(?shaders, "no host pipeline: {reason} (logged once)");
     }
     None
+}
+
+/// Both process-level arms measure the original dispatch and its backing.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn hot_buffer_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("VICTORY_HOT_BUFFER_PRIORITY").as_deref(), Ok("0" | "1")))
+}
+
+/// Mutually exclusive probes share per-recording submission counters.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn load4_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        if std::env::var_os("VICTORY_TEST_LOAD4_DXIL").is_none() {
+            return false;
+        }
+        if crate::ab::bit("VICTORY_TEST_DOT_FAMILY").is_some() {
+            tracing::error!("load4 disabled: the zero-dispatch probe is also enabled");
+            return false;
+        }
+        true
+    })
+}
+
+#[cfg(feature = "diagnostics")]
+pub(crate) fn load4_selected() -> bool {
+    static BIT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    BIT.get_or_init(|| crate::ab::bit("VICTORY_TEST_LOAD4")).is_none_or(crate::ab::on)
+}
+
+/// The experiment keeps the original PSO in its usual library. Its candidate
+/// is a second PSO, built directly for precisely this original translation.
+#[cfg(feature = "diagnostics")]
+fn load4_candidate(shader: &Shader, root: &ID3D12RootSignature, device: &ID3D12Device) -> Option<ID3D12PipelineState> {
+    const GUEST: &str = "8cbd7f5b9ce7530c0c785e78d2465359071fc7be4f2cc041ad149c41671a1a7e";
+    const ORIGINAL: &str = "005f514f269896f37a1e3d9d8b53ba6084eb2cabf1a2ba0168fb1789194536e4";
+    const CANDIDATE: &str = "087255583de15f78260764e61fb9f6e85c1452a2da34aa98400fca2d23346f32";
+    if shader.stage != "compute" || shader.hash.as_str() != &GUEST[..16] || !load4_on() {
+        return None;
+    }
+    static IMAGE: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    let bytes = IMAGE.get_or_init(|| {
+        let path = std::path::PathBuf::from(std::env::var_os("VICTORY_TEST_LOAD4_DXIL")?);
+        let data = std::fs::read(&path).map_err(|err| tracing::error!(?path, %err, "load4 image read failed")).ok()?;
+        let actual = blake3::hash(&data).to_hex();
+        if actual.as_str() != CANDIDATE {
+            tracing::error!(?path, %actual, expected = CANDIDATE, "load4 candidate digest mismatch");
+            return None;
+        }
+        Some(data)
+    }).as_ref()?;
+    let orig = blake3::hash(&shader.translated()?.host.dxil).to_hex();
+    let guest = blake3::hash(&shader.container).to_hex();
+    if orig.as_str() != ORIGINAL || guest.as_str() != GUEST {
+        tracing::error!(%guest, %orig, "load4 original digest mismatch");
+        return None;
+    }
+    let desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+        // SAFETY: borrowed exactly as in the normal compute PSO creation.
+        pRootSignature: unsafe { std::mem::transmute_copy(root) },
+        CS: D3D12_SHADER_BYTECODE { pShaderBytecode: bytes.as_ptr().cast(), BytecodeLength: bytes.len() },
+        ..Default::default()
+    };
+    // SAFETY: root and bytecode remain live throughout synchronous PSO creation.
+    match unsafe { device.CreateComputePipelineState(&desc) } {
+        Ok(pso) => {
+            static FIRST: std::sync::Once = std::sync::Once::new();
+            FIRST.call_once(|| tracing::info!(guest = GUEST, original = ORIGINAL, candidate = CANDIDATE, "load4 candidate PSO created directly"));
+            Some(pso)
+        }
+        Err(err) => {
+            tracing::error!(%err, candidate = CANDIDATE, "load4 candidate PSO creation failed");
+            None
+        }
+    }
 }
 
 impl HostPipeline {
@@ -636,6 +714,8 @@ impl HostPipeline {
             return Some(HostPipeline {
                 compute: true,
                 mesh: false,
+                #[cfg(feature = "diagnostics")]
+                load4: load4_candidate(stages[0].0.as_ref(), &root, &host.device),
                 pso,
                 root,
                 stages: bound,
@@ -689,6 +769,8 @@ impl HostPipeline {
             return Some(HostPipeline {
                 compute: false,
                 mesh: true,
+                #[cfg(feature = "diagnostics")]
+                load4: None,
                 pso,
                 root,
                 stages: bound,
@@ -805,6 +887,8 @@ impl HostPipeline {
         Some(HostPipeline {
             compute: false,
             mesh: false,
+            #[cfg(feature = "diagnostics")]
+            load4: None,
             pso,
             root,
             stages: bound,

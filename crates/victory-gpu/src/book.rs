@@ -196,6 +196,10 @@ unsafe extern "system" fn release(this: *mut c_void) -> u32 {
         let left = (*this.cast::<Notice>()).references.fetch_sub(1, Ordering::AcqRel) - 1;
         if left == 0 {
             let gone = Box::from_raw(this.cast::<Notice>());
+            if gone.id & (1u64 << 63) != 0 {
+                tracing::info!(object = gone.object, bytes = gone.id & !(1u64 << 63), frame = crate::frame::current(), "large DEFAULT UAV released");
+                return 0;
+            }
             let now = crate::host::now_ms();
             with(|b| b.remove(gone.id, gone.object, now));
         }
@@ -300,6 +304,17 @@ fn texture_address(texture: &ID3D12Resource, desc: &D3D12_RESOURCE_DESC) -> Opti
     match decode(&words) {
         Names::Texture { base, .. } => Some(base),
         _ => None,
+    }
+}
+
+/// Observe committed DEFAULT UAVs >= 8 MiB in this diagnostic executable.
+pub(crate) fn observe_large_default(resource: &ID3D12Resource, bytes: u64) {
+    if let Ok(object) = resource.cast::<ID3D12Object>() {
+        let tracked = !on();
+        tracing::info!(object = object.as_raw() as usize, bytes, tracked, frame = crate::frame::current(), "large DEFAULT UAV created");
+        if tracked {
+            watch(&object, (1u64 << 63) | bytes);
+        }
     }
 }
 

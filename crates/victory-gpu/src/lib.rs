@@ -21,6 +21,10 @@ mod ambient;
 mod capture;
 #[cfg(windows)]
 mod compose;
+#[cfg(windows)]
+pub mod map_clock;
+#[cfg(windows)]
+pub mod fingerprint_dual;
 pub mod console;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod copystat;

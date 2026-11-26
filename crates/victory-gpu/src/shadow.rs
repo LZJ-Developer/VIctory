@@ -346,8 +346,32 @@ pub(crate) fn card_hash_bytes(size: u64) -> u64 {
 /// copy, if the copy is to be there: [`cards`] is on, the size is within
 /// [`card_limits`] and below 1 GiB (the compare counts in 32 bits), and the
 /// host has what it takes (`Host::card_ready`).
-fn card_for(size: u64) -> Option<ID3D12Resource> {
-    let there = card_room_for(size);
+fn card_for(start: u64, len: u64, size: u64) -> Option<ID3D12Resource> {
+    // The allocation rule uses only the rounded resource size and the normal pool cap.
+    // HOT_LEN labels the known UAV in receipts without affecting the decision.
+    const HOT_LEN: u64 = 21_045_760;
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = cfg!(feature = "diagnostics") && *ENABLED.get_or_init(|| {
+        std::env::var_os("VICTORY_HOT_BUFFER_PRIORITY").is_some_and(|v| v == "1")
+    });
+    let (least, most) = card_limits();
+    let reserve = if enabled && least < (1 << 20) && size < (1 << 20) {
+        (256 << 20).min(most / 3)
+    } else {
+        0
+    };
+    let observe = enabled && len == HOT_LEN;
+    if enabled {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracing::info!(least, most, small_below = 1 << 20, large_reserve = (256 << 20).min(most / 3),
+                "size-tiered card buffer admission enabled");
+        });
+    }
+    let there = card_room_for(start, size, reserve, observe);
+    if observe {
+        tracing::info!(start, len, size, local = there.is_some(), "size-tiered allocation outcome for observed buffer");
+    }
     if there.is_some() || !card_all() || size >= 1 << 30 {
         return there;
     }
@@ -376,16 +400,19 @@ fn card_all() -> bool {
 }
 
 /// [`card_for`] in the card's own memory.
-fn card_room_for(size: u64) -> Option<ID3D12Resource> {
+fn card_room_for(start: u64, size: u64, reserve: u64, observe: bool) -> Option<ID3D12Resource> {
     if !cards() {
+        if observe { tracing::warn!(start, size, "hot buffer refused: card buffers disabled"); }
         return None;
     }
     let (least, most) = card_limits();
     if size < least || size >= 1 << 30 {
+        if observe { tracing::warn!(start, size, least, "hot buffer refused: size limit"); }
         return None;
     }
     let host = host()?;
     if !host.card_ready() {
+        if observe { tracing::warn!(start, size, "hot buffer refused: card copy support unavailable"); }
         return None;
     }
     // Only while the card has room: with this copy on it, a fifth of the
@@ -397,9 +424,19 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
     // (With `card_room_kept_on` the texture queue kept this copy's room
     // free, and the copy may go up to the queue's own line.)
     let hundredths = if card_room_kept_on() { 97 } else { 80 };
-    if let Some([budget, used, ..]) = host.video_memory()
+    let memory = host.video_memory();
+    if observe {
+        if let Some([budget, used, ..]) = memory {
+            tracing::info!(start, size, used, budget, hundredths, "hot buffer physical budget check");
+        } else {
+            tracing::warn!(start, size, "hot buffer refused: physical budget unavailable");
+            return None;
+        }
+    }
+    if let Some([budget, used, ..]) = memory
         && used + size > budget / 100 * hundredths
     {
+        if observe { tracing::warn!(start, size, used, budget, hundredths, "hot buffer refused: physical budget"); }
         // Said, with the numbers it was decided by: run 193 made 31 copies
         // of 95 and no line named the others. The first 64, then every
         // 32nd.
@@ -422,13 +459,26 @@ fn card_room_for(size: u64) -> Option<ID3D12Resource> {
         }
         return None;
     }
-    if CARD_BYTES[0].fetch_add(size, Ordering::Relaxed) + size > most {
+    let charged = CARD_BYTES[0].fetch_add(size, Ordering::Relaxed);
+    if charged + size > most.saturating_sub(reserve) {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
+        if observe {
+            tracing::warn!(start, size, charged, most, "hot buffer refused: normal card pool cap");
+        } else if reserve > 0 && charged + size <= most {
+            static DISPLACED: AtomicU64 = AtomicU64::new(0);
+            let count = DISPLACED.fetch_add(1, Ordering::Relaxed) + 1;
+            if count.is_power_of_two() {
+                tracing::info!(start, size, charged, most, reserve, count, "size-tiered small-buffer admission refused");
+            }
+        }
         return None;
     }
     let buffer = host.uav_buffer(size);
     if buffer.is_none() {
         CARD_BYTES[0].fetch_sub(size, Ordering::Relaxed);
+        if observe { tracing::warn!(start, size, "hot buffer refused: local resource allocation failed"); }
+    } else if observe {
+        tracing::info!(start, size, charged, most, "observed buffer admitted within normal card pool");
     }
     buffer
 }
@@ -4984,7 +5034,7 @@ fn lookup(address: u64, len: u64, any: bool) -> Option<Arc<Shadow>> {
         crate::host::name(&buffer, || format!("title buffer {:#x}+{len:#x}", key.0));
         // A big one, with `cards`: shaders get a buffer in the card's own
         // memory, and the one just made is the CPU's side.
-        let (buffer, card) = match card_for(size) {
+        let (buffer, card) = match card_for(key.0, len, size) {
             Some(on_card) => {
                 crate::host::name(&on_card, || format!("title buffer {:#x}+{len:#x} on the card", key.0));
                 tracing::info!(

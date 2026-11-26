@@ -3382,12 +3382,50 @@ impl HostHeap {
         }
     }
 
+    /// Backing actually retained by this descriptor at command recording time.
+    /// Heap properties describe allocation class; residency can change over time.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn load4_slot_backing(&self, index: u32) -> String {
+        use windows::core::Interface;
+        let (key, resource) = {
+            let _slot = self.made.lock(index);
+            (self.made.get(index), self.kept_in(index))
+        };
+        let view = key.and_then(Self::describe_slot_key).unwrap_or_else(|| "unavailable".into());
+        let heap_id = self.heap.as_raw() as usize;
+        let Some(r) = resource else {
+            return format!("descriptor_heap={heap_id:#x} kept_in=None view={view}");
+        };
+        // SAFETY: the retained resource clone stays alive through the queries.
+        let desc = unsafe { r.GetDesc() };
+        let va = (desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER).then(|| unsafe { r.GetGPUVirtualAddress() });
+        let mut props = D3D12_HEAP_PROPERTIES::default();
+        let mut flags = D3D12_HEAP_FLAGS::default();
+        let class = match unsafe { r.GetHeapProperties(Some(&mut props), Some(&mut flags)) } {
+            Ok(()) => {
+                let expanded = if [D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_TYPE_READBACK].contains(&props.Type) {
+                    host().map(|host| unsafe { host.device.GetCustomHeapProperties(0, props.Type) })
+                } else { None };
+                format!("type={} pool={} cpu_page={} flags={:#x} expanded_pool={:?} expanded_cpu_page={:?}",
+                    props.Type.0, props.MemoryPoolPreference.0, props.CPUPageProperty.0, flags.0,
+                    expanded.map(|p| p.MemoryPoolPreference.0), expanded.map(|p| p.CPUPageProperty.0))
+            }
+            Err(err) => format!("GetHeapProperties failed: {err}"),
+        };
+        format!("descriptor_heap={heap_id:#x} kept_in=Some resource={:#x} dimension={} resource_width={} gpu_va={va:#x?} {class} view={view}",
+            r.as_raw() as usize, desc.Dimension.0, desc.Width)
+    }
+
     /// The view host slot `index` was made from, in a few words, with the
     /// title and host addresses of a buffer view (diagnostics). "null" for
     /// a slot never made or left null.
     #[cfg(feature = "diagnostics")]
     pub(crate) fn describe_slot(&self, index: u32) -> Option<String> {
-        let key = self.made.get(index)?;
+        Self::describe_slot_key(self.made.get(index)?)
+    }
+
+    #[cfg(feature = "diagnostics")]
+    fn describe_slot_key(key: u64) -> Option<String> {
         if key == 0 {
             return Some("null".into());
         }

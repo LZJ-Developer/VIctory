@@ -1568,6 +1568,7 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
         static READ: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
     let len = len as usize;
+    let mut probe = crate::fingerprint_dual::Probe::begin(at as usize, len);
     let mut print = 0u128;
     READ.with(|read| {
         let mut read = read.borrow_mut();
@@ -1575,6 +1576,7 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
         let mut take = |from: usize, bytes: usize| {
             read[..bytes].fill(0);
             crate::host::copy_mapped(read.as_mut_ptr(), (at as usize + from) as *const u8, bytes, false);
+            if let Some(probe) = &mut probe { probe.observe(from, &read[..bytes]); }
             print = print.rotate_left(37) ^ digest(&read[..bytes]).0;
         };
         if len <= 3 * WINDOW {
@@ -1585,6 +1587,7 @@ pub(crate) fn fingerprint(at: u64, len: u64) -> u64 {
             take(len - WINDOW, WINDOW);
         }
     });
+    if let Some(probe) = probe { probe.finish(); }
     let first = (print as u64 ^ (print >> 64) as u64).to_le_bytes();
     u64::from_le_bytes(first) | 1
 }

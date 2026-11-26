@@ -1209,6 +1209,15 @@ pub(crate) struct HostList {
     /// and at the end, and where they are read back.
     #[cfg(feature = "diagnostics")]
     stamps: OnceLock<Option<(ID3D12QueryHeap, ID3D12Resource)>>,
+    #[cfg(feature = "diagnostics")]
+    focus_ops: Mutex<std::sync::Arc<spans::FocusOps>>,
+    #[cfg(feature = "diagnostics")]
+    focus_dispatch: Mutex<focus_dispatch::Recording>,
+    #[cfg(feature = "diagnostics")]
+    focus_barriers: Mutex<focus_dispatch::Barriers>,
+    // Counts belong to the recorded commands. Submitting a reused list counts them again.
+    #[cfg(feature = "diagnostics")]
+    dot_probe_counts: [AtomicU32; 2],
 }
 
 /// A list's prelude: an allocator and a closed list.
@@ -2977,6 +2986,26 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                 }
                 &Step::Fill(_, src, len, _) => {
                     if read_blocked(written, src, len) {
+                        // Isolate the observed constants fill for an A/B run.
+                        // B reads the current title bytes; an in-flight writer
+                        // may still publish newer bytes, so this is diagnostic.
+                        #[cfg(feature = "diagnostics")]
+                        if len == 384
+                            && crate::ab::pick("VICTORY_TEST_FILL_384") == Some(true)
+                            && written
+                                .get(written.partition_point(|r| r.1 <= src))
+                                .is_some_and(|&(from, to)| {
+                                    to - from == 174 << 20
+                                        && from <= src
+                                        && src.saturating_add(len) <= to
+                                })
+                        {
+                            if count {
+                                tracing::info!(frame = crate::frame::current(), bytes = len,
+                                    "A/B 384-byte fill bypassed its dependency");
+                            }
+                            continue;
+                        }
                         if count {
                             LATE_STATS[16].fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "diagnostics")]
@@ -3095,7 +3124,14 @@ fn joins_asked() -> (usize, usize) {
     let (parts, lists) = *MOST.get_or_init(|| (of("VICTORY_JOIN_PARTS").unwrap_or(1).max(1), of("VICTORY_JOIN_LISTS").unwrap_or(48).max(1)));
     #[cfg(feature = "diagnostics")]
     if let Some(on) = crate::ab::pick("VICTORY_JOIN_PARTS") {
-        return (if on { 8 } else { 1 }, lists);
+        // With an explicit candidate, alternate it with the configured limit.
+        // Keep the original 1-versus-8 experiment when there is no candidate.
+        static CANDIDATE: OnceLock<Option<usize>> = OnceLock::new();
+        let (baseline, candidate) = match *CANDIDATE.get_or_init(|| of("VICTORY_JOIN_PARTS_AB").filter(|&n| n > 0)) {
+            Some(candidate) => (parts, candidate),
+            None => (1, 8),
+        };
+        return (if on { candidate } else { baseline }, lists);
     }
     (parts, lists)
 }
@@ -3689,6 +3725,8 @@ mod send;
 pub(crate) use send::{goes_as_words, words_under};
 #[cfg(feature = "diagnostics")]
 pub(crate) mod spans;
+#[cfg(feature = "diagnostics")]
+pub(crate) mod focus_dispatch;
 mod torn;
 #[cfg(feature = "diagnostics")]
 mod traffic;
@@ -4112,6 +4150,14 @@ impl Host {
                 notes,
                 #[cfg(feature = "diagnostics")]
                 stamps: OnceLock::new(),
+                #[cfg(feature = "diagnostics")]
+                focus_ops: Mutex::default(),
+                #[cfg(feature = "diagnostics")]
+                focus_dispatch: Mutex::default(),
+                #[cfg(feature = "diagnostics")]
+                focus_barriers: Mutex::default(),
+                #[cfg(feature = "diagnostics")]
+                dot_probe_counts: Default::default(),
             })
         }
     }
@@ -5676,6 +5722,8 @@ impl Host {
         for (shadow, at, bytes) in batch.placed.drain(..) {
             shadow.placed_copy(at, &bytes);
         }
+        #[cfg(feature = "diagnostics")]
+        let mut comparison_start = lists.len();
         if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
             lists.push(Some(check));
         }
@@ -5696,18 +5744,70 @@ impl Host {
         #[cfg(feature = "diagnostics")]
         if let Some((ahead, behind)) = stamp.and_then(stamps::lists) {
             lists.insert(0, Some(ahead));
+            comparison_start += 1;
             lists.push(Some(behind));
             firsts.iter_mut().for_each(|first| *first += 1);
         }
         #[cfg(feature = "diagnostics")]
         let sending = crate::timeline::ticks();
+        #[cfg(feature = "diagnostics")]
+        if focus_dispatch::on() {
+            if !crate::timeline::on() {
+                static FREQ: OnceLock<u64> = OnceLock::new();
+                focus_dispatch::collect(unsafe {self.fence.GetCompletedValue()},*FREQ.get_or_init(||unsafe{self.queue.GetTimestampFrequency().unwrap_or(0)}));
+            }
+            for list in runs {
+                if let Some(sample) = list.focus_dispatch_sample() {
+                    sample.submitted();
+                }
+            }
+        }
         if late {
             *submitted += 1;
             #[cfg(feature = "diagnostics")]
-            if let Some([front, behind]) = self.span_lists() {
-                lists.insert(0, Some(front));
-                lists.push(Some(behind));
-                firsts.iter_mut().for_each(|first| *first += 1);
+            {
+                let mut roles = Vec::new();
+                let mut title_lists = Vec::new();
+                if spans::detailed() && stamp.is_none() {
+                    use spans::Role;
+                    roles.resize(lists.len(), Role::Preparation);
+                    for (run, &end) in firsts.iter().skip(1).chain(std::iter::once(&comparison_start)).enumerate() {
+                        if run != 0 || own.is_none() {
+                            roles[end - 1] = Role::Title;
+                            if spans::inventory_on() || focus_dispatch::on() {
+                                title_lists.push((end - 1, runs[run]));
+                            }
+                        }
+                    }
+                    roles[comparison_start..].fill(Role::Compare);
+                }
+                if let Some(markers) = self.span_lists(&roles, lists.len(), *submitted, &title_lists) {
+                    if !markers.ends.is_empty() {
+                        let original = std::mem::take(&mut lists);
+                        lists.reserve(original.len() + markers.lists.len());
+                        for first in &mut firsts {
+                            if *first != 0 {
+                                *first += 1 + markers.ends.partition_point(|&end| end < *first);
+                            }
+                        }
+                        let mut starts = std::iter::once(0).chain(markers.ends).peekable();
+                        let mut markers = markers.lists.into_iter();
+                        for (index, list) in original.into_iter().enumerate() {
+                            if starts.next_if_eq(&index).is_some() {
+                                lists.push(markers.next());
+                            }
+                            lists.push(list);
+                        }
+                        lists.push(markers.next());
+                        debug_assert_eq!(markers.len(), 0);
+                        debug_assert_eq!(starts.count(), 1);
+                    } else if let Ok([front, before_compare, behind]) = <[_; 3]>::try_from(markers.lists) {
+                        lists.insert(comparison_start, Some(before_compare));
+                        lists.insert(0, Some(front));
+                        lists.push(Some(behind));
+                        firsts.iter_mut().for_each(|first| *first += 1);
+                    }
+                }
             }
             let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
             // SAFETY: closed lists; the fence is ours.
@@ -5719,6 +5819,13 @@ impl Host {
                 }
                 self.queue.Signal(&self.fence, *submitted)
             };
+            #[cfg(feature = "diagnostics")]
+            if signalled.is_ok() {focus_dispatch::queue(runs,*submitted);}
+            #[cfg(feature = "diagnostics")]
+            if signalled.is_ok() && dot_probe_on() {
+                // An optional prep list precedes the title lists, all under this fence.
+                dot_probe_submitted(&runs[usize::from(own.is_some())..], *submitted);
+            }
             awake::sent(&self.device);
             #[cfg(feature = "diagnostics")]
             crate::timeline::sent(sending, *submitted, stamp);
@@ -5774,7 +5881,14 @@ impl Host {
                 let waited = self
                     .queue
                     .Signal(&self.fence, *submitted)
-                    .and_then(|()| self.fence.SetEventOnCompletion(*submitted, self.event));
+                    .and_then(|()| {
+                        #[cfg(feature = "diagnostics")]
+                        if dot_probe_on() {
+                            let sent_runs = if timing() { &runs[i..i + 1] } else { runs };
+                            dot_probe_submitted(sent_runs, *submitted);
+                        }
+                        self.fence.SetEventOnCompletion(*submitted, self.event)
+                    });
                 #[cfg(feature = "diagnostics")]
                 crate::timeline::sent(sending, *submitted, stamp);
                 match waited {
@@ -6184,7 +6298,36 @@ impl Host {
     }
 }
 
+#[cfg(feature = "diagnostics")]
+fn dot_probe_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| crate::ab::bit("VICTORY_TEST_DOT_FAMILY").is_some() || crate::pipeline::host::load4_on())
+}
+
+#[cfg(feature = "diagnostics")]
+fn dot_probe_submitted(runs: &[&HostList], fence: u64) {
+    let mut normal = 0u64;
+    let mut zero = 0u64;
+    for run in runs {
+        normal += u64::from(run.dot_probe_counts[0].load(Ordering::Relaxed));
+        zero += u64::from(run.dot_probe_counts[1].load(Ordering::Relaxed));
+    }
+    if normal != 0 || zero != 0 {
+        if crate::pipeline::host::load4_on() {
+            tracing::info!(fence, original = normal, candidate = zero, "load4 submitted");
+        } else {
+            tracing::info!(fence, normal, zero, "dot probe submitted");
+        }
+    }
+}
+
 impl HostList {
+    /// Called only for a matching dispatch recorded by the dot-family A/B probe.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn dot_probe_record(&self, zeroed: bool) {
+        self.dot_probe_counts[usize::from(zeroed)].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// The timestamp heap and its read-back buffer (diagnostics, timing on).
     #[cfg(feature = "diagnostics")]
     fn stamps(&self) -> Option<&(ID3D12QueryHeap, ID3D12Resource)> {
@@ -6271,6 +6414,8 @@ impl HostList {
         }
         self.batches_common();
         self.card_budget_out();
+        #[cfg(feature = "diagnostics")]
+        self.focus_dispatch_close();
         self.take_coming();
         #[cfg(feature = "diagnostics")]
         if let Some((heap, back)) = self.stamps() {
@@ -6328,6 +6473,21 @@ impl HostList {
         self.indirects.lock().unwrap_or_else(|e| e.into_inner()).clear();
         #[cfg(feature = "diagnostics")]
         self.notes.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        #[cfg(feature = "diagnostics")]
+        if dot_probe_on() {
+            for count in &self.dot_probe_counts {
+                count.store(0, Ordering::Relaxed);
+            }
+        }
+        #[cfg(feature = "diagnostics")]
+        if focus_dispatch::on() {
+            *self.focus_dispatch.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+            *self.focus_barriers.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        }
+        #[cfg(feature = "diagnostics")]
+        if spans::inventory_on() {
+            *self.focus_ops.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        }
         {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
             (scratch.current, scratch.used) = (0, 0);
@@ -6427,6 +6587,8 @@ impl HostList {
             );
             // SAFETY: an open list and a live texture.
             unsafe { self.list.ResourceBarrier(&[barrier]) };
+            #[cfg(feature = "diagnostics")]
+            self.focus_op(|| format!("texture transition {before:#x} -> {wanted:#x}"));
         }
     }
 
@@ -6791,6 +6953,14 @@ impl HostList {
         }
         self.states.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
             && self.twins.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+    }
+
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn focus_op(&self, signature: impl FnOnce() -> String) {
+        if spans::inventory_on() {
+            let mut ops = self.focus_ops.lock().unwrap_or_else(|e| e.into_inner());
+            std::sync::Arc::make_mut(&mut *ops).note(signature());
+        }
     }
 
     /// Notes an indirect execution, while device-removed data is kept
@@ -8693,7 +8863,14 @@ impl Meter {
     /// Counts a presented frame.
     fn frame(&mut self, hwnd: HWND) {
         #[cfg(feature = "diagnostics")]
-        tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
+        {
+            let qpc = crate::timeline::ticks();
+            let (started, finished) = submissions();
+            let (dual_started,dual_done,dual_partial)=crate::fingerprint_dual::checkpoint();
+            tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(),
+                qpc, drawn = crate::draw::drawn(), dispatched = crate::draw::dispatched(),
+                started, finished, dual_started, dual_done, dual_partial, "present");
+        }
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
         self.frames += 1;
@@ -9635,6 +9812,12 @@ impl Host {
             crate::book::made(b, || "an unordered access buffer".into());
         }
         let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident(&self.device, b))).and_then(|()| mapped(&self.device));
+        #[cfg(feature = "diagnostics")]
+        if made.is_ok() && size >= 8 << 20 {
+            if let Some(b) = &buffer {
+                crate::book::observe_large_default(b, size);
+            }
+        }
         match made {
             Ok(()) => buffer,
             Err(e) => {

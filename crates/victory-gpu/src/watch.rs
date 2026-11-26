@@ -2206,6 +2206,7 @@ pub(crate) fn views_mapped(section: usize, offset: u64, len: usize) {
 /// ([`views_mapped`]). What is guarded of its pages at other views is opened,
 /// and not guarded again before the change is done ([`Remapping`]).
 pub fn title_memory_splitting(at: usize, len: usize) {
+    let _phase = crate::map_clock::phase(crate::map_clock::Phase::SplitNotify);
     let others: Vec<usize> = elsewhere(at, len).into_iter().flat_map(|(_, others)| others).collect();
     if others.is_empty() {
         return;
@@ -2248,6 +2249,7 @@ pub struct Remapping(#[allow(dead_code)] std::sync::RwLockWriteGuard<'static, ()
 
 impl Drop for Remapping {
     fn drop(&mut self) {
+        let _phase = crate::map_clock::phase(crate::map_clock::Phase::Unlock);
         // The change is done: what is there now may be guarded.
         if CHANGING.replace((false, false)).1 {
             guards().changing.clear();
@@ -2440,8 +2442,11 @@ pub fn title_memory_reading_now() -> Option<Reading> {
 /// neither guarded nor writable) and a kernel read into it fail, so the
 /// write access is given back.
 pub fn title_memory_remapped(at: usize, len: usize) {
-    crate::texback::remapped(at, len);
-    open(&mut title_memory_changed(at, len), at, at.saturating_add(len));
+    let _phase = crate::map_clock::phase(crate::map_clock::Phase::Remapped);
+    { let _p=crate::map_clock::phase(crate::map_clock::Phase::Texback); crate::texback::remapped(at, len); }
+    let mut g=title_memory_changed(at,len);
+    let _p=crate::map_clock::phase(crate::map_clock::Phase::OpenPages);
+    open(&mut g,at,at.saturating_add(len));
 }
 
 /// The runtime is about to unmap title memory `[at, at + len)`: it is
@@ -2450,7 +2455,8 @@ pub fn title_memory_remapped(at: usize, len: usize) {
 /// before the unmapping would leave the address guarded, clean and known by
 /// its bits ([`PUBLISHED`]) with no view behind it.
 pub fn title_memory_unmapping(at: usize, len: usize) {
-    crate::texback::remapped(at, len);
+    let _phase = crate::map_clock::phase(crate::map_clock::Phase::Unmapping);
+    { let _p=crate::map_clock::phase(crate::map_clock::Phase::Texback); crate::texback::remapped(at, len); }
     let mut g = title_memory_changed(at, len);
     if CHANGING.get().0 && len != 0 {
         CHANGING.set((true, true));
@@ -2527,14 +2533,15 @@ fn allocation_end(at: usize, inside: usize) -> usize {
 /// Tells what keeps track of what title memory shows; the guards, with no
 /// block of the range known unmapped.
 fn title_memory_changed(at: usize, len: usize) -> std::sync::MutexGuard<'static, Guards> {
+    let _phase = crate::map_clock::phase(crate::map_clock::Phase::GuardState);
     // A placed texture there arrives, goes or changes with no descriptor
     // written.
-    crate::descriptor::host::remapped(at, len);
+    { let _p=crate::map_clock::phase(crate::map_clock::Phase::Descriptors); crate::descriptor::host::remapped(at, len); }
     // The views the runtime told us of there are no longer what it shows.
-    crate::inplace::views_gone(at, len);
+    { let _p=crate::map_clock::phase(crate::map_clock::Phase::ViewsGone); crate::inplace::views_gone(at, len); }
     // And nothing stays in place over it.
-    crate::inplace::title_memory_freeing(at, len);
-    let mut g = guards();
+    { let _p=crate::map_clock::phase(crate::map_clock::Phase::InplaceFree); crate::inplace::title_memory_freeing(at, len); }
+    let mut g = { let _p=crate::map_clock::phase(crate::map_clock::Phase::GuardWait); guards() };
     let range = at / BLOCK..at.saturating_add(len).div_ceil(BLOCK);
     let absent: Vec<usize> = g.absent.range(range.clone()).collect();
     for block in absent {
