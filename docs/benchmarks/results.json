@@ -1,0 +1,286 @@
+{
+  "format_version": 1,
+  "experiment_dates_local": [
+    "2026-11-26",
+    "2026-11-27"
+  ],
+  "hardware_and_scope": {
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU, nominal 8 GB dedicated memory",
+    "graphics_api": "D3D12, Windows",
+    "profile": "Xbox Series S",
+    "warm_run_present_source": [
+      1920,
+      1080
+    ],
+    "reported_title_display_mode": [
+      3840,
+      2160
+    ],
+    "quality_scope": "The compared arms used the same settings. Per-frame internal render size and pixel equivalence were not established. Host Present is a software event; scanout was not measured.",
+    "timing": "Milliseconds unless a field states otherwise. Each experiment has its own denominator; do not add costs across runs."
+  },
+  "gpu_19_dispatches": {
+    "test": "Comparison across independent game processes. All 19 ordinals, full shader IDs and dispatch group triples matched; 768 MiB buffer pool cap. The policy reserves headroom for larger buffers. GPU timestamps bracket individual dispatches.",
+    "limit": "Legacy captures admitted lists over 50 ms only. The new sparse sampler used a different gate. These matched samples do not establish an unconditional workload distribution, identical resource contents across runs, a WDDM migration event or a frame-rate gain.",
+    "original_placement": {
+      "matched_sequences": 16,
+      "sum_dispatch_gpu_ms_p50": 117.362688,
+      "first_begin_to_last_end_gpu_ms_p50": 117.392896
+    },
+    "size_tier_admission": {
+      "matched_sequences": 24,
+      "sum_dispatch_gpu_ms_p50": 3.975168,
+      "first_begin_to_last_end_gpu_ms_p50": 3.976704
+    }
+  },
+  "hot_present_window": {
+    "window": "First 240 host Present intervals after hot resource anchor, diagnostics enabled",
+    "intervals": 240,
+    "wall_seconds": 21.407927,
+    "fps_intervals_per_wall_second": 11.2108,
+    "interval_ms": {
+      "mean_ms": 89.199697,
+      "p50_ms": 73.67215,
+      "p95_ms": 184.0066,
+      "p99_ms": 325.1974,
+      "max_ms": 811.5665
+    },
+    "over_30_fps_budget_count": 234,
+    "gap_to_30_fps_mean_ms": 55.866363,
+    "no_mapper_overlap_intervals": 152,
+    "over_budget_without_mapper_overlap": 148,
+    "limit": "Single anchored run, with diagnostic overhead and variable scene load."
+  },
+  "map_clear_batch_582": {
+    "measurement": "One real game mapper batch. API times are thread wall time including waits and preemption; restored fragments include their Map calls.",
+    "requested_pages": 2147,
+    "cleared_mapped_pages": 2143,
+    "already_empty_pages": 4,
+    "batch_wall_ms": 511.8623,
+    "edit_lock_held_ms": 509.5421,
+    "mutually_exclusive_ms": {
+      "windows_unmap": 439.1636,
+      "restore_surviving_fragments": 54.9104,
+      "remaining_page_bookkeeping": 3.6957,
+      "remaining_notifications_and_guard_cleanup": 8.6188,
+      "remaining_control_and_query": 3.0899,
+      "instrumentation_closure_gap": 0.0637
+    },
+    "windows_unmap_calls": 840,
+    "map_calls_within_restoration": 98,
+    "map_ms_within_restoration": 52.0875
+  },
+  "native_clear_replay": {
+    "test": "Rebuilt identical ordered mapper history from 682 game batches; A leaves individual clears separate, B combines touching zero-source clear requests. Six paired timings on Windows. Measurement covers native mutations and survivor repairs, excluding decoding, pre-grouping and verification.",
+    "pairs": 6,
+    "batch_582_calls": {
+      "A": {
+        "map": 98,
+        "unmap": 840
+      },
+      "B": {
+        "map": 92,
+        "unmap": 834
+      }
+    },
+    "batch_582_median_ms": {
+      "A": 2.92885,
+      "B": 2.7896
+    },
+    "paired_A_minus_B_ms": {
+      "median_paired_saved_ms": 0.07895,
+      "min_paired_saved_ms": 0.0555,
+      "max_paired_saved_ms": 0.3946
+    },
+    "hot_clear_batches": 91,
+    "hot_clear_calls": {
+      "A": {
+        "map": 1492,
+        "unmap": 7836
+      },
+      "B": {
+        "map": 1466,
+        "unmap": 7810
+      }
+    },
+    "limit": "Native replay did not reproduce the long game-thread stall. Some equivalent backing layouts differ in Windows allocation region boundaries."
+  },
+  "live_clear_coalescing_baab": {
+    "test": "Same binary, warm cache, settings and input script. A is reference; B combines adjacent clear requests. Each arm counts 240 host Present intervals after the first hot binding.",
+    "arms": [
+      {
+        "arm": "B1",
+        "intervals": 240,
+        "fps": 10.192168,
+        "p50_ms": 79.1614,
+        "p99_ms": 324.6551,
+        "draws": 386271,
+        "dispatches": 408712,
+        "requested_pages_in_complete_batches": 85463,
+        "clear_groups": 690
+      },
+      {
+        "arm": "A1",
+        "intervals": 240,
+        "fps": 9.112006,
+        "p50_ms": 87.88245,
+        "p99_ms": 384.3229,
+        "draws": 504592,
+        "dispatches": 467988,
+        "requested_pages_in_complete_batches": 87729,
+        "clear_groups": 0
+      },
+      {
+        "arm": "A2",
+        "intervals": 240,
+        "fps": 11.082918,
+        "p50_ms": 75.31835,
+        "p99_ms": 266.5737,
+        "draws": 255168,
+        "dispatches": 288466,
+        "requested_pages_in_complete_batches": 32814,
+        "clear_groups": 0
+      },
+      {
+        "arm": "B2",
+        "intervals": 240,
+        "fps": 8.789047,
+        "p50_ms": 99.01305,
+        "p99_ms": 341.4682,
+        "draws": 694277,
+        "dispatches": 498279,
+        "requested_pages_in_complete_batches": 98445,
+        "clear_groups": 602
+      }
+    ],
+    "strict_frame_pairs_across_all_runs": 18,
+    "strict_hot_clear_heavy_pairs": 0,
+    "matched_hot_slow_frame_saving_ms": null,
+    "limit": "Fixed interval count did not fix scene workload. No matched hot clear-heavy frame pair (at least 256 requested pages)."
+  },
+  "unmap_thread_states": {
+    "test": "Independent diagnostic process; sample query bracket wholly inside the same thread's successful native Unmap, in qualifying hot clear-heavy batches (at least 100 ms and 256 requested pages).",
+    "hot_unmap_calls": 794,
+    "calls_with_samples": 159,
+    "samples": 169,
+    "states": {
+      "waiting_WrPushLock": 162,
+      "running": 6,
+      "standby": 1,
+      "ready": 0
+    },
+    "limit": "Duration-biased point observations. No exact repeat of original batch 582; neither per-state dwell milliseconds nor lock owner were identified."
+  },
+  "fingerprint_dual_read": {
+    "test": "Read-only observer in the registered 16 GiB window. Compare the original sampled ranges byte-for-byte against backing aliases or established holes while the mapping generation is stable. Counts are calls except where noted.",
+    "intervals": 240,
+    "calls": 5956,
+    "fully_verified": 705,
+    "pure_alias_verified": 700,
+    "mixed_alias_and_hole_verified": 5,
+    "busy_unresolved": 5251,
+    "generation_changed_within_unresolved": 23,
+    "calls_with_mismatch_among_resolved": 0,
+    "cross_page_sample": {
+      "attempted_calls": 452,
+      "verified_calls": 27
+    },
+    "verified_calls_with_reinstalled_pages": 63,
+    "verified_calls_with_different_backing": 27,
+    "resolved_alias_bytes": 6060032,
+    "resolved_hole_bytes": 81920,
+    "different_bytes": 0,
+    "mapper_in_same_window": {
+      "pages": 32992,
+      "map_calls": 8432,
+      "unmap_calls": 5563
+    },
+    "observed_calls_eliminated": {
+      "map": 0,
+      "unmap": 0
+    },
+    "timed_probe_union_ms_per_interval": 0.169958,
+    "limit": "Cohorts overlap. Unresolved calls have no equality verdict. All original host operations still ran; the direct timing bracket is not a measured saving or proof that views can be removed for all readers."
+  },
+  "submit_and_gpu": {
+    "test": "Separate heavier diagnostics run, fully paired direct queue timestamps and host Present return intervals. The descriptor wait is matched against overlapping worker scanning brackets in the same time base.",
+    "all_hot": {
+      "intervals": 16,
+      "average_ms": {
+        "direct": 47.9641,
+        "before_next_send": 89.112,
+        "in_next_send": 0.804,
+        "sent_until_gpu_start": 5.381,
+        "wall": 143.2611
+      },
+      "descriptor_wait_total_ms": {
+        "sender_wait": 144.6761,
+        "requested_scan": 115.977,
+        "background_scan": 28.2908,
+        "outside_named_scans": 0.4083
+      }
+    },
+    "no_mapper_overlap": {
+      "intervals": 6,
+      "average_ms": {
+        "direct": 43.2231,
+        "before_next_send": 55.0711,
+        "in_next_send": 0.8853,
+        "sent_until_gpu_start": 5.2786,
+        "wall": 104.4581
+      },
+      "descriptor_wait_total_ms": {
+        "sender_wait": 50.0714,
+        "background_scan": 16.0093,
+        "requested_scan": 33.9764,
+        "outside_named_scans": 0.0857
+      }
+    },
+    "limit": "Direct stamps can include queue work other than shaders. Time before next send does not prove whole-device idleness. Worker brackets include potential waits. No live A/B of earlier descriptor requests."
+  },
+  "readback_and_upload_controls": {
+    "readback_granularity": {
+      "test": "Reconstruct the post-dispatch image from one before/after pair, relative to the observed buffer view.",
+      "total_bytes": 21045760,
+      "changed_bytes": 12041637,
+      "cases": [
+        {
+          "block_bytes": 65536,
+          "copy_payload_bytes": 12582912,
+          "contiguous_runs": 2
+        },
+        {
+          "block_bytes": 4096,
+          "copy_payload_bytes": 12488704,
+          "contiguous_runs": 3
+        }
+      ],
+      "limit": "Payload estimate only; excludes comparison, metadata, commands and waits."
+    },
+    "redundant_upload": {
+      "test": "In eight consecutive live buffer versions, pre-copy source and target were equal for all 21,045,760 bytes in each. Separately, reran the original dispatch from fixed input with and without one redundant upload.",
+      "live_versions": 8,
+      "total_replay_pairs": 25,
+      "timed_pairs_excluding_warmup": 24,
+      "verified_replay_outputs": 50,
+      "bytes_checked_per_output": 21045760,
+      "optional_gpu_copy_median_ms": {
+        "copy": 1.63936,
+        "skip": 0.000736
+      },
+      "median_paired_gpu_copy_saving_ms": 1.63864,
+      "positive_control": "Changing one source byte made an unconditional skip fail verification.",
+      "limit": "No cheap runtime version proof or measured live-frame improvement follows from this control."
+    },
+    "cpu_read_gpu_upload": {
+      "test": "Fixed dispatch and source, alternating pairs. Host read timing after fence covers Map, memcpy and Unmap. Default path DMA to a readback resource occurs before that host-read bracket.",
+      "timed_pairs_excluding_warmup": 10,
+      "bytes": 21045760,
+      "host_read_median_ms": {
+        "cached_readback": 1.45345,
+        "direct_gpu_upload": 435.2025
+      },
+      "limit": "Only the measured CPU read direction, fixed buffer and tested adapter. No frame-time measurement."
+    }
+  }
+}

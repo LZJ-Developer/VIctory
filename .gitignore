@@ -25,6 +25,15 @@
 /cache/
 /out/
 
+# Local profiler runs and raw traces
+/runs/
+/captures/
+*.etl
+*.wpix
+*.nsys-rep
+fingerprint-dual.tsv
+views.tsv
+
 # Executables, libraries, symbols
 *.exe
 *.dll
