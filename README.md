@@ -1,5 +1,7 @@
 # DexNom Runtime
 
+**RTX 4060 Laptop performance study** · [Source, frame-time data and community handoff](https://github.com/LZJ-Developer/VIctory/tree/community/rtx4060-handoff-2026-11-27). The Windows Series S test recorded 11.21 FPS across 240 host Present intervals. A PowerShell script reproduces the frame statistics from the published samples.
+
 DexNom Runtime is a community fork of Marvisak's VIctory for Windows x64. It runs an Xbox Series executable from your own game installation and translates its GPU work for Direct3D 12. It builds on the Radeon runtime tested at `e061c69032b84ec6e2ec17340469cd689500dafd` and adds fixes for static sampler selection, wave64 lane masks and integer render targets. Game files, executables, saves and generated shader caches stay on your own computer.
 
 ## Run it on your PC
