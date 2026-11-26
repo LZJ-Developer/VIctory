@@ -1,0 +1,27 @@
+name: Bug report
+description: Report incorrect behavior in the runtime, build, or launcher.
+labels: ["bug"]
+body:
+  - type: input
+    id: build
+    attributes:
+      label: Branch and commit or release tag
+      description: If the build is unknown, say how it was obtained.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can someone reproduce it?
+      description: Include the starting state, commands or actions, and how often it happens. A one-off observation is welcome.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: System and diagnostic details
+      description: Windows version, GPU, driver, and a short error excerpt can help. Remove personal paths from excerpts.

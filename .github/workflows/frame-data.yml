@@ -1,0 +1,70 @@
+name: Frame data
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frame-data:
+    name: Frame statistics
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Compare the published window with the benchmark report
+        run: |
+          Set-StrictMode -Version Latest
+          $report = (Get-Content ./docs/benchmarks/results.json -Raw | ConvertFrom-Json).hot_present_window
+          $measured = & ./scripts/Measure-PresentWindow.ps1 | ConvertFrom-Json
+          if ($measured.present_intervals -ne $report.intervals) {
+              throw "Sample count differs: measured $($measured.present_intervals), published $($report.intervals)."
+          }
+          if ([Math]::Round($measured.observed_fps, 4) -ne $report.fps_intervals_per_wall_second) {
+              throw "FPS differs: measured $($measured.observed_fps), published $($report.fps_intervals_per_wall_second)."
+          }
+          Write-Output "$($measured.present_intervals) intervals, $($measured.observed_fps) FPS."
+      - name: Check a four-frame example with known statistics
+        run: |
+          Set-StrictMode -Version Latest
+          $sample = Join-Path $env:RUNNER_TEMP 'four-frames.json'
+          @'
+          {
+            "schema": "victory-present-window-v1",
+            "qpc_hz": 1000,
+            "interval_count": 4,
+            "intervals": [
+              {"duration_ticks": 35, "mapper_overlap_ticks": 0},
+              {"duration_ticks": 10, "mapper_overlap_ticks": 0},
+              {"duration_ticks": 60, "mapper_overlap_ticks": 20},
+              {"duration_ticks": 20, "mapper_overlap_ticks": 5}
+            ]
+          }
+          '@ | Set-Content -LiteralPath $sample
+          $measured = & ./scripts/Measure-PresentWindow.ps1 -Path $sample | ConvertFrom-Json
+          $expected = @{
+              present_intervals = 4
+              observed_fps = 32
+              mean_ms = 31.25
+              p50_ms = 27.5
+              p95_ms = 60
+              p99_ms = 60
+              intervals_over_30fps_budget = 2
+              intervals_without_mapper_overlap = 2
+              intervals_over_budget_without_mapper_overlap = 1
+              mapper_overlap_total_ms = 25
+          }
+          foreach ($key in $expected.Keys) {
+              if ($measured.$key -ne $expected[$key]) {
+                  throw "${key}: expected $($expected[$key]), got $($measured.$key)."
+              }
+          }

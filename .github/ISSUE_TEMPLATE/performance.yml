@@ -1,0 +1,29 @@
+name: Performance report
+description: Report a slow scene, a frame-time regression, or a measured improvement.
+labels: ["performance"]
+body:
+  - type: input
+    id: build
+    attributes:
+      label: Branch and commit tested
+      description: Include both commits for a comparison. A release tag or “unknown” is also fine.
+    validations:
+      required: true
+  - type: textarea
+    id: scene
+    attributes:
+      label: What happened and how can someone replay the scene?
+      description: Give the route or action, preset, and whether the shader cache was warm or cold.
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: Hardware and resolution
+      description: Include CPU, GPU, VRAM, driver, console profile, internal render size and output size. Use “unknown” for settings the game does not expose.
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements, if available
+      description: For each run, include the number of frames or batches, P50 and P99 in milliseconds, and what was timed (host Present, GPU work, or CPU wait). For A/B comparisons, say how the scene and workload were matched.
+      placeholder: A new report can start with the observed symptom alone.

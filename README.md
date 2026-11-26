@@ -21,7 +21,7 @@ VIctory 是把 Xbox Series 游戏的系统与图形调用接到 Windows 和 Dire
 **只复核帧率，不需要游戏或显卡。** 以下命令在 PowerShell 7 中读取仓库内的 240 个相对时间间隔，输出 FPS、P50/P95/P99、超预算帧数，以及有多少个间隔和映射批次重叠。对应结果为 11.2108 FPS、234/240 超过 33.33 ms。[公开样本](docs/benchmarks/present-window.json)
 
 ```powershell
-git clone --single-branch --branch community/rtx4060-handoff-2026-11-27 https://github.com/LZJ-Developer/VIctory.git
+git clone --single-branch https://github.com/LZJ-Developer/VIctory.git
 cd VIctory
 pwsh -NoProfile -File ./scripts/Measure-PresentWindow.ps1
 ```
@@ -43,6 +43,8 @@ $env:VICTORY_HOT_BUFFER_PRIORITY = '1'
 
 **只前移描述符扫描请求。** 描述符告诉 GPU 要读哪块缓冲或纹理。当前提交线程可能到准备发送时才等索引扫描结束。候选改法是在游戏命令刚入队时请求扫描，让后台线程利用排队时间工作；如果此后有相关写入，提交线程仍要等写入之后才开始的扫描轮次。Belobug 分支保留了这个实现，也同时改了日志锁分片。把两个改动拆开，才能给提前扫描单独定价。[本地同步代码](crates/victory-gpu/src/descriptor.rs) · [上游设计和轮次契约](https://github.com/Belobug/VIctory-Belobug-AMD/blob/cd8dfc06ace7ccb91a19431e74bc2d0de2a10145/crates/victory-gpu/src/port_journal.rs#L5-L53)
 
-验收时在同一构建内切换 A/B，分别报告同负载呈现间隔、提交线程等待和 GPU 时间，同时核对相同纹理代次的输出。若提交等待减少而呈现没有提前，记录这段等待转移到了哪里。复现报告附上提交号、GPU/驱动、内部与输出分辨率（可观测者）、样本数、P50/P99 和工作量匹配数即可。
+验收时在同一构建内切换 A/B，分别报告同负载呈现间隔、提交线程等待和 GPU 时间，同时核对相同纹理代次的输出。若提交等待减少而呈现没有提前，记录这段等待转移到了哪里。复现报告附上提交号、GPU/驱动、内部与输出分辨率（可观测者）、样本数、P50/P99 和工作量匹配数即可。[提交性能报告](https://github.com/LZJ-Developer/VIctory/issues/new?template=performance.yml) · [贡献指南](CONTRIBUTING.md)
 
 本分支沿用 VIctory 及其社区贡献者的代码和许可，从公开可取的 `f4b48ad` 源码提交派生。构建和启动输入的改动共 18 个 Rust 文件。版权及格式表例外沿用上游记录。[上游基线](https://github.com/avatarmanz/VIctory-7900XTX/commit/f4b48ad766ddbec1a1867022cd42f7645b0dd55e) · [许可证](LICENSE) · [上游资产约定](docs/asset-policy.md)
+
+11 月 27 日交接时的源码和数据保存在[实测快照](https://github.com/LZJ-Developer/VIctory/tree/3a47dccf8558e774506d44ceedf15b4465a73e63)。需要此前 DexNom 安装器的读者可查阅[原默认版本](https://github.com/LZJ-Developer/VIctory/tree/6f866cdbcb158d5fdf328a974db5154670ef814a)。
