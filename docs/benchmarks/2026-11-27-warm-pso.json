@@ -1,0 +1,346 @@
+{
+  "schema": "victory-warm-pso-handoff-v1",
+  "date": "2026-11-27",
+  "setup": {
+    "hardware": "NVIDIA GeForce RTX 4060 Laptop GPU, 8 GiB, driver 572.83, Intel Core i7-12800HX, 32 GB RAM",
+    "title_profile": "Xbox Series S",
+    "host_output_px": [
+      1920,
+      1080
+    ],
+    "power": "AC power with application GPU keep-awake enabled",
+    "binary_sha256": "03594491c14b43439a2855b0f1170eb99e557cbba17c72bcb4922a7f88fe8d22",
+    "cache_seed_sha256": "5e701d257425fd74a232196159cd05854239ba481ff93cbac0b77ce15ef6251a",
+    "arm_order": [
+      "B1",
+      "A1",
+      "A2",
+      "B2"
+    ],
+    "route": "Same save and warm cache. Press Enter for 0.8 s at 16, 24 and 32 s from launch. Select 240 adjacent host Present intervals after the first binding of the 21,102,592-byte UAV.",
+    "frame_timing": "Application markers immediately after DXGI Present, using QPC. FPS is interval count divided by elapsed wall seconds. P50 and P99 use linear interpolation between sorted observations.",
+    "treated_range_bytes": 21045760,
+    "selection": "Whole CPU refresh of this exact range with separate staging in a preparation group containing the monitored 32 KiB texture. All arms retain the existing dirty-range publication and GPU upload.",
+    "A": "Existing full copy into CPU staging.",
+    "B": "Compare the source with staging and write blocks with different contents."
+  },
+  "arms": {
+    "B1": {
+      "hot_intervals": 240,
+      "trace_rows": 12121,
+      "trace_rows_lost": 0,
+      "eligible_calls": 203,
+      "single_copy_or_compare_p50_ms": 2.7717,
+      "single_copy_or_compare_p99_ms": 7.324,
+      "window_fps": 8.1588,
+      "window_present_p50_ms": 89.44605,
+      "window_present_p99_ms": 577.40687,
+      "frame_work_totals": {
+        "draw": 565121,
+        "dispatch": 491532,
+        "submit": 4210
+      }
+    },
+    "A1": {
+      "hot_intervals": 240,
+      "trace_rows": 12409,
+      "trace_rows_lost": 0,
+      "eligible_calls": 121,
+      "single_copy_or_compare_p50_ms": 2.6287,
+      "single_copy_or_compare_p99_ms": 4.95406,
+      "window_fps": 6.81342,
+      "window_present_p50_ms": 114.45025,
+      "window_present_p99_ms": 596.56323,
+      "frame_work_totals": {
+        "draw": 713611,
+        "dispatch": 574500,
+        "submit": 4147
+      }
+    },
+    "A2": {
+      "hot_intervals": 240,
+      "trace_rows": 12409,
+      "trace_rows_lost": 0,
+      "eligible_calls": 156,
+      "single_copy_or_compare_p50_ms": 2.6044,
+      "single_copy_or_compare_p99_ms": 4.9287,
+      "window_fps": 6.22324,
+      "window_present_p50_ms": 133.2787,
+      "window_present_p99_ms": 620.37578,
+      "frame_work_totals": {
+        "draw": 342798,
+        "dispatch": 439225,
+        "submit": 4458
+      }
+    },
+    "B2": {
+      "hot_intervals": 240,
+      "trace_rows": 11082,
+      "trace_rows_lost": 0,
+      "eligible_calls": 180,
+      "single_copy_or_compare_p50_ms": 2.9946,
+      "single_copy_or_compare_p99_ms": 6.81972,
+      "window_fps": 6.44947,
+      "window_present_p50_ms": 123.04475,
+      "window_present_p99_ms": 664.06488,
+      "frame_work_totals": {
+        "draw": 585310,
+        "dispatch": 508341,
+        "submit": 4267
+      }
+    }
+  },
+  "cross_arm_match": {
+    "active_frame_rule": "Equal per-interval draw, dispatch and guest submission counts, with at least one draw or dispatch.",
+    "active_pairs_across_A_vs_B": 0,
+    "slow_pairs_across_A_vs_B": 0,
+    "slow_threshold_ms": 100,
+    "matched_slow_frame_p50_saved_ms": null,
+    "matched_slow_frame_p99_saved_ms": null,
+    "pixel_equivalence": "unmeasured"
+  },
+  "pooled_calls": {
+    "A": {
+      "calls": 277,
+      "last_in_group": 273,
+      "single_operation_p50_ms": 2.6067,
+      "single_operation_p99_ms": 5.04522,
+      "source_range_bytes_total": 5829675520
+    },
+    "B": {
+      "calls": 383,
+      "last_in_group": 380,
+      "single_operation_p50_ms": 2.912,
+      "single_operation_p99_ms": 7.43317,
+      "source_range_bytes_total": 8060526080,
+      "staging_store_bytes": 0,
+      "calls_without_stores": 383,
+      "failed_comparisons": 0
+    }
+  },
+  "fixed_input": {
+    "repetitions_per_condition_per_input": 24,
+    "validation": "Full CPU output bytes checked after each replay.",
+    "inputs": [
+      {
+        "input": "unchanged",
+        "A_p50_us": 1773,
+        "B_p50_us": 1287,
+        "B_staging_bytes_stored": 0
+      },
+      {
+        "input": "sparse",
+        "A_p50_us": 1768,
+        "B_p50_us": 1409,
+        "B_staging_bytes_stored": 20608
+      },
+      {
+        "input": "dispatch_changed",
+        "A_p50_us": 1804,
+        "B_p50_us": 1614,
+        "B_staging_bytes_stored": 12476352
+      }
+    ]
+  },
+  "warm_pso_periods": {
+    "selection": "Complete consecutive engine report periods inside each arm window. The measured counter sums waiting across recording threads. The engine divides by its frame count and logs one decimal place. Weight periods by their frame count to reconstruct each arm mean.",
+    "by_arm": {
+      "B1": {
+        "frames": 227,
+        "frame_weighted_mean_thread_wait_ms": 13.37797,
+        "periods": [
+          {
+            "frames": 38,
+            "thread_wait_ms_per_frame": 3.9
+          },
+          {
+            "frames": 33,
+            "thread_wait_ms_per_frame": 31.0
+          },
+          {
+            "frames": 53,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 53,
+            "thread_wait_ms_per_frame": 35.2
+          },
+          {
+            "frames": 50,
+            "thread_wait_ms_per_frame": 0.0
+          }
+        ]
+      },
+      "A1": {
+        "frames": 225,
+        "frame_weighted_mean_thread_wait_ms": 15.53244,
+        "periods": [
+          {
+            "frames": 33,
+            "thread_wait_ms_per_frame": 36.5
+          },
+          {
+            "frames": 40,
+            "thread_wait_ms_per_frame": 19.9
+          },
+          {
+            "frames": 31,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 33,
+            "thread_wait_ms_per_frame": 44.3
+          },
+          {
+            "frames": 36,
+            "thread_wait_ms_per_frame": 0.9
+          },
+          {
+            "frames": 52,
+            "thread_wait_ms_per_frame": 0.0
+          }
+        ]
+      },
+      "A2": {
+        "frames": 237,
+        "frame_weighted_mean_thread_wait_ms": 0.27426,
+        "periods": [
+          {
+            "frames": 35,
+            "thread_wait_ms_per_frame": 0.4
+          },
+          {
+            "frames": 34,
+            "thread_wait_ms_per_frame": 1.5
+          },
+          {
+            "frames": 36,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 48,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 42,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 17,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 25,
+            "thread_wait_ms_per_frame": 0.0
+          }
+        ]
+      },
+      "B2": {
+        "frames": 219,
+        "frame_weighted_mean_thread_wait_ms": 6.67078,
+        "periods": [
+          {
+            "frames": 34,
+            "thread_wait_ms_per_frame": 0.0
+          },
+          {
+            "frames": 44,
+            "thread_wait_ms_per_frame": 11.4
+          },
+          {
+            "frames": 23,
+            "thread_wait_ms_per_frame": 5.9
+          },
+          {
+            "frames": 39,
+            "thread_wait_ms_per_frame": 20.4
+          },
+          {
+            "frames": 35,
+            "thread_wait_ms_per_frame": 0.8
+          },
+          {
+            "frames": 44,
+            "thread_wait_ms_per_frame": 0.0
+          }
+        ]
+      }
+    }
+  },
+  "A1_peak_period": {
+    "start_utc": "2026-11-27T08:43:25.851173Z",
+    "end_utc": "2026-11-27T08:43:31.588092Z",
+    "duration_us": 5736919,
+    "frames": 33,
+    "thread_wait_ms_per_frame": 44.3,
+    "first_bind_stage_notices": 81,
+    "distinct_first_bound_guest_pipeline_objects": 47,
+    "host_mesh_pipeline_ready_notices": 3,
+    "pairing": "Guest mesh/pixel hash pairs were unique among first-bound guest objects in this period. The host success message contains the shader pair. Identifying the full PSO key, cache outcome and consumer wait requires a separate trace.",
+    "time_origin": "t_us is relative to start_utc, computed from UTC log emission times. first_guest_mesh_bind uses the mesh-stage first-bind notice. host_after_present uses the application marker after DXGI Present.",
+    "pairs": [
+      {
+        "mesh_hash": "74a70fe506cab1ae",
+        "pixel_hash": "899ef7a2932ae6c1",
+        "first_bind_to_host_notice_us": 6679
+      },
+      {
+        "mesh_hash": "da22b2adfd4f76d3",
+        "pixel_hash": "f87e29908986f4d8",
+        "first_bind_to_host_notice_us": 901735
+      },
+      {
+        "mesh_hash": "89036e16fa081505",
+        "pixel_hash": "8b96c511f839323e",
+        "first_bind_to_host_notice_us": 908933
+      }
+    ],
+    "selected_events": [
+      {
+        "t_us": 959296,
+        "event": "first_guest_mesh_bind",
+        "mesh_hash": "74a70fe506cab1ae",
+        "guest_frame_token": 1811
+      },
+      {
+        "t_us": 960377,
+        "event": "first_guest_mesh_bind",
+        "mesh_hash": "89036e16fa081505",
+        "guest_frame_token": 1811
+      },
+      {
+        "t_us": 965975,
+        "event": "host_mesh_pipeline_ready_notice",
+        "mesh_hash": "74a70fe506cab1ae"
+      },
+      {
+        "t_us": 967136,
+        "event": "first_guest_mesh_bind",
+        "mesh_hash": "da22b2adfd4f76d3",
+        "guest_frame_token": 1811
+      },
+      {
+        "t_us": 1494676,
+        "event": "host_after_present",
+        "guest_frame_token": 1812,
+        "display_frame": 1811
+      },
+      {
+        "t_us": 1694555,
+        "event": "host_after_present",
+        "guest_frame_token": 1813,
+        "display_frame": 1812
+      },
+      {
+        "t_us": 1868871,
+        "event": "host_mesh_pipeline_ready_notice",
+        "mesh_hash": "da22b2adfd4f76d3"
+      },
+      {
+        "t_us": 1869310,
+        "event": "host_mesh_pipeline_ready_notice",
+        "mesh_hash": "89036e16fa081505"
+      }
+    ]
+  }
+}
